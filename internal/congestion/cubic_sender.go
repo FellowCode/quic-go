@@ -2,6 +2,8 @@ package congestion
 
 import (
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -16,6 +18,9 @@ const (
 	initialMaxDatagramSize     = protocol.ByteCount(protocol.InitialPacketSize)
 	maxBurstPackets            = 3
 	renoBeta                   = 0.7 // Reno backoff factor.
+	maxRenoBeta                = 0.95
+	aggressiveRenoAckDivisor   = 4
+	defaultRTTScalingMaxFactor = 4.0
 	minCongestionWindowPackets = 2
 	initialCongestionWindow    = 32
 )
@@ -59,6 +64,9 @@ type cubicSender struct {
 
 	lastState qlog.CongestionState
 	qlogger   qlogwriter.Recorder
+
+	rttScalingAggression float64
+	rttScalingMaxFactor  float64
 }
 
 var (
@@ -172,8 +180,17 @@ func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
 }
 
 func (c *cubicSender) MaybeExitSlowStart() {
-	if c.InSlowStart() &&
-		c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
+	if c.InSlowStart() {
+		cwndInPackets := c.GetCongestionWindow() / c.maxDatagramSize
+		aggression := c.rttAggressionFactor()
+		// Keep slow start longer on higher RTTs to ramp up BDP faster.
+		minSlowStartPackets := protocol.ByteCount(math.Round(float64(hybridStartLowWindow) * aggression))
+		if cwndInPackets < max(hybridStartLowWindow, minSlowStartPackets) {
+			return
+		}
+		if !c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), cwndInPackets) {
+			return
+		}
 		// exit slow start
 		c.slowStartThreshold = c.congestionWindow
 		c.maybeQlogStateChange(qlog.CongestionStateCongestionAvoidance)
@@ -209,7 +226,10 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 	c.maybeQlogStateChange(qlog.CongestionStateRecovery)
 
 	if c.reno {
-		c.congestionWindow = protocol.ByteCount(float64(c.congestionWindow) * renoBeta)
+		aggression := c.rttAggressionFactor()
+		// Increase beta towards 1.0 as aggression grows to reduce cutback.
+		beta := min(maxRenoBeta, renoBeta+(aggression-1)*(maxRenoBeta-renoBeta))
+		c.congestionWindow = protocol.ByteCount(float64(c.congestionWindow) * beta)
 	} else {
 		c.congestionWindow = c.cubic.CongestionWindowAfterPacketLoss(c.congestionWindow)
 	}
@@ -252,7 +272,13 @@ func (c *cubicSender) maybeIncreaseCwnd(
 	if c.reno {
 		// Classic Reno congestion avoidance.
 		c.numAckedPackets++
-		if c.numAckedPackets >= uint64(c.congestionWindow/c.maxDatagramSize) {
+		acksForIncrease := c.congestionWindow / c.maxDatagramSize
+		if c.rttScalingAggression > 0 {
+			aggression := c.rttAggressionFactor()
+			divisor := int(math.Round(1 + (aggression-1)*(aggressiveRenoAckDivisor-1)))
+			acksForIncrease = max(1, acksForIncrease/protocol.ByteCount(max(1, divisor)))
+		}
+		if c.numAckedPackets >= uint64(acksForIncrease) {
 			c.congestionWindow += c.maxDatagramSize
 			c.numAckedPackets = 0
 		}
@@ -262,6 +288,41 @@ func (c *cubicSender) maybeIncreaseCwnd(
 			c.cubic.CongestionWindowAfterAck(ackedBytes, c.congestionWindow, c.rttStats.MinRTT(), eventTime),
 		)
 	}
+}
+
+func (c *cubicSender) pathRTT() time.Duration {
+	rtt := c.rttStats.SmoothedRTT()
+	if rtt == 0 {
+		rtt = c.rttStats.LatestRTT()
+	}
+	return rtt
+}
+
+func (c *cubicSender) rttAggressionFactor() float64 {
+	if c.rttScalingAggression <= 0 {
+		return 1
+	}
+	rtt := c.pathRTT()
+	if rtt <= 0 {
+		return 1
+	}
+	factor := 1 + c.rttScalingAggression*float64(rtt)/float64(time.Second)
+	maxFactor := c.rttScalingMaxFactor
+	if maxFactor <= 0 {
+		maxFactor = defaultRTTScalingMaxFactor
+	}
+	return min(maxFactor, max(1.0, factor))
+}
+
+func (c *cubicSender) SetRenoRTTScaling(cfg RenoRTTScalingConfig) {
+	if cfg.Aggression < 0 {
+		cfg.Aggression = 0
+	}
+	if cfg.MaxFactor < 0 {
+		cfg.MaxFactor = 0
+	}
+	c.rttScalingAggression = cfg.Aggression
+	c.rttScalingMaxFactor = cfg.MaxFactor
 }
 
 func (c *cubicSender) isCwndLimited(bytesInFlight protocol.ByteCount) bool {

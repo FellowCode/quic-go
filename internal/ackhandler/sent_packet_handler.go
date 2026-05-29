@@ -92,6 +92,7 @@ type sentPacketHandler struct {
 	congestion congestion.SendAlgorithmWithDebugInfos
 	rttStats   *utils.RTTStats
 	connStats  *utils.ConnectionStats
+	ccConfig   CongestionControlConfig
 
 	// The number of times a PTO has been sent without receiving an ack.
 	ptoCount uint32
@@ -115,6 +116,11 @@ type sentPacketHandler struct {
 
 var _ SentPacketHandler = &sentPacketHandler{}
 
+type CongestionControlConfig struct {
+	RenoRTTScalingAggression float64
+	RenoRTTScalingMaxFactor  float64
+}
+
 // clientAddressValidated indicates whether the address was validated beforehand by an address validation token.
 // If the address was validated, the amplification limit doesn't apply. It has no effect for a client.
 func NewSentPacketHandler(
@@ -129,7 +135,35 @@ func NewSentPacketHandler(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
+	return NewSentPacketHandlerWithCongestionConfig(
+		initialPN,
+		initialMaxDatagramSize,
+		rttStats,
+		connStats,
+		clientAddressValidated,
+		enableECN,
+		ignorePacketsBelow,
+		pers,
+		qlogger,
+		logger,
+		CongestionControlConfig{},
+	)
+}
+
+func NewSentPacketHandlerWithCongestionConfig(
+	initialPN protocol.PacketNumber,
+	initialMaxDatagramSize protocol.ByteCount,
+	rttStats *utils.RTTStats,
+	connStats *utils.ConnectionStats,
+	clientAddressValidated bool,
+	enableECN bool,
+	ignorePacketsBelow func(protocol.PacketNumber),
+	pers protocol.Perspective,
+	qlogger qlogwriter.Recorder,
+	logger utils.Logger,
+	ccConfig CongestionControlConfig,
+) SentPacketHandler {
+	cong := congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		rttStats,
 		connStats,
@@ -137,6 +171,10 @@ func NewSentPacketHandler(
 		true, // use Reno
 		qlogger,
 	)
+	cong.SetRenoRTTScaling(congestion.RenoRTTScalingConfig{
+		Aggression: ccConfig.RenoRTTScalingAggression,
+		MaxFactor:  ccConfig.RenoRTTScalingMaxFactor,
+	})
 
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
@@ -147,7 +185,8 @@ func NewSentPacketHandler(
 		lostPackets:                    *newLostPacketTracker(64),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
-		congestion:                     congestion,
+		congestion:                     cong,
+		ccConfig:                       ccConfig,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -1131,7 +1170,7 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.appDataPackets.history.PathProbes() {
 		h.appDataPackets.history.RemovePathProbe(pn)
 	}
-	h.congestion = congestion.NewCubicSender(
+	cong := congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		h.rttStats,
 		h.connStats,
@@ -1139,5 +1178,10 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 		true, // use Reno
 		h.qlogger,
 	)
+	cong.SetRenoRTTScaling(congestion.RenoRTTScalingConfig{
+		Aggression: h.ccConfig.RenoRTTScalingAggression,
+		MaxFactor:  h.ccConfig.RenoRTTScalingMaxFactor,
+	})
+	h.congestion = cong
 	h.setLossDetectionTimer(now)
 }

@@ -128,6 +128,10 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "EnableStreamResetPartialDelivery":
 			f.Set(reflect.ValueOf(true))
+		case "RenoRTTScalingAggression":
+			f.Set(reflect.ValueOf(2.5))
+		case "RenoRTTScalingMaxFactor":
+			f.Set(reflect.ValueOf(3.5))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}
@@ -196,4 +200,22 @@ func TestConfigZeroLimits(t *testing.T) {
 	c := populateConfig(config)
 	require.Zero(t, c.MaxIncomingStreams)
 	require.Zero(t, c.MaxIncomingUniStreams)
+}
+
+func TestConfigValidationRenoRTTScaling(t *testing.T) {
+	conf := &Config{
+		RenoRTTScalingAggression: -1,
+		RenoRTTScalingMaxFactor:  0.5,
+	}
+	require.NoError(t, validateConfig(conf))
+	require.Zero(t, conf.RenoRTTScalingAggression)
+	require.Equal(t, 1.0, conf.RenoRTTScalingMaxFactor)
+
+	conf = &Config{
+		RenoRTTScalingAggression: 2,
+		RenoRTTScalingMaxFactor:  -2,
+	}
+	require.NoError(t, validateConfig(conf))
+	require.Equal(t, 2.0, conf.RenoRTTScalingAggression)
+	require.Zero(t, conf.RenoRTTScalingMaxFactor)
 }

@@ -175,6 +175,14 @@ type Config struct {
 	// Enable QUIC Stream Resets with Partial Delivery.
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-07.
 	EnableStreamResetPartialDelivery bool
+	// RenoRTTScalingAggression enables RTT-dependent Reno CWND aggressiveness.
+	// If set to a positive value, the aggressiveness factor is computed as:
+	// factor = 1 + RenoRTTScalingAggression * (RTT / 1s).
+	// A value of 0 disables RTT-dependent aggression.
+	RenoRTTScalingAggression float64
+	// RenoRTTScalingMaxFactor caps the RTT-dependent Reno aggressiveness factor.
+	// If set to 0, an internal default cap is used.
+	RenoRTTScalingMaxFactor float64
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
 }

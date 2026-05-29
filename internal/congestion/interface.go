@@ -5,6 +5,15 @@ import (
 	"github.com/quic-go/quic-go/internal/protocol"
 )
 
+// RenoRTTScalingConfig configures RTT-dependent Reno aggressiveness.
+// Aggression controls how quickly the aggressiveness factor grows with RTT:
+// factor = 1 + Aggression * (RTT / 1s).
+// MaxFactor caps this factor. If MaxFactor is 0, a default cap is applied.
+type RenoRTTScalingConfig struct {
+	Aggression float64
+	MaxFactor  float64
+}
+
 // A SendAlgorithm performs congestion control
 type SendAlgorithm interface {
 	TimeUntilSend(bytesInFlight protocol.ByteCount) monotime.Time
