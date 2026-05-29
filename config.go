@@ -45,6 +45,15 @@ func validateConfig(config *Config) error {
 	if config.InitialPacketSize > protocol.MaxPacketBufferSize {
 		config.InitialPacketSize = protocol.MaxPacketBufferSize
 	}
+	if config.RenoRTTScalingAggression < 0 {
+		config.RenoRTTScalingAggression = 0
+	}
+	if config.RenoRTTScalingMaxFactor < 0 {
+		config.RenoRTTScalingMaxFactor = 0
+	}
+	if config.RenoRTTScalingMaxFactor > 0 && config.RenoRTTScalingMaxFactor < 1 {
+		config.RenoRTTScalingMaxFactor = 1
+	}
 	// check that all QUIC versions are actually supported
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
@@ -123,6 +132,8 @@ func populateConfig(config *Config) *Config {
 		InitialPacketSize:                initialPacketSize,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
+		RenoRTTScalingAggression:         config.RenoRTTScalingAggression,
+		RenoRTTScalingMaxFactor:          config.RenoRTTScalingMaxFactor,
 		Allow0RTT:                        config.Allow0RTT,
 		Tracer:                           config.Tracer,
 	}

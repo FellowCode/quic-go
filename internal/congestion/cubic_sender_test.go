@@ -592,3 +592,50 @@ func TestCubicSenderLimitCwndIncreaseInCongestionAvoidance(t *testing.T) {
 	testSender.AckNPackets(2)
 	require.Equal(t, savedCwnd+maxDatagramSize, sender.GetCongestionWindow())
 }
+
+func TestCubicSenderRTTScalingKeepsSlowStartLonger(t *testing.T) {
+	sender := newTestCubicSender(false)
+	sender.sender.SetRenoRTTScaling(RenoRTTScalingConfig{
+		Aggression: 5, // factor = 1 + 5 * 0.2 = 2
+	})
+	sender.rttStats.UpdateRTT(200*time.Millisecond, 0)
+	sender.sender.hybridSlowStart.hystartFound = true
+
+	sender.sender.congestionWindow = 31 * maxDatagramSize
+	sender.sender.MaybeExitSlowStart()
+	require.Equal(t, protocol.MaxByteCount, sender.sender.slowStartThreshold)
+
+	sender.sender.congestionWindow = 32 * maxDatagramSize
+	sender.sender.MaybeExitSlowStart()
+	require.Equal(t, sender.sender.congestionWindow, sender.sender.slowStartThreshold)
+}
+
+func TestCubicSenderRTTScalingRenoCongestionAvoidanceIsMoreAggressive(t *testing.T) {
+	sender := newTestCubicSender(false)
+	sender.sender.SetRenoRTTScaling(RenoRTTScalingConfig{
+		Aggression: 5, // factor = 2, divisor = 4
+	})
+	sender.rttStats.UpdateRTT(200*time.Millisecond, 0)
+	sender.sender.slowStartThreshold = sender.sender.GetCongestionWindow()
+	sender.bytesInFlight = sender.sender.GetCongestionWindow()
+
+	initialCwnd := sender.sender.GetCongestionWindow()
+	sender.sender.OnPacketAcked(1, maxDatagramSize, sender.bytesInFlight, sender.clock.Now())
+	require.Equal(t, initialCwnd, sender.sender.GetCongestionWindow())
+
+	sender.sender.OnPacketAcked(2, maxDatagramSize, sender.bytesInFlight, sender.clock.Now())
+	require.Equal(t, initialCwnd+maxDatagramSize, sender.sender.GetCongestionWindow())
+}
+
+func TestCubicSenderRTTScalingRenoBackoffIsSofter(t *testing.T) {
+	sender := newTestCubicSender(false)
+	sender.sender.SetRenoRTTScaling(RenoRTTScalingConfig{
+		Aggression: 5, // factor = 2
+	})
+	sender.rttStats.UpdateRTT(200*time.Millisecond, 0)
+	sender.sender.slowStartThreshold = sender.sender.GetCongestionWindow()
+
+	initialCwnd := sender.sender.GetCongestionWindow()
+	sender.LosePacket(1)
+	require.Equal(t, protocol.ByteCount(float64(initialCwnd)*maxRenoBeta), sender.sender.GetCongestionWindow())
+}

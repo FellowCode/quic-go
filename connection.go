@@ -309,7 +309,7 @@ var newConnection = func(
 	)
 	s.preSetup()
 	s.rttStats.SetInitialRTT(rtt)
-	s.sentPacketHandler = ackhandler.NewSentPacketHandler(
+	s.sentPacketHandler = ackhandler.NewSentPacketHandlerWithCongestionConfig(
 		0,
 		protocol.ByteCount(s.config.InitialPacketSize),
 		s.rttStats,
@@ -320,6 +320,10 @@ var newConnection = func(
 		s.perspective,
 		s.qlogger,
 		s.logger,
+		ackhandler.CongestionControlConfig{
+			RenoRTTScalingAggression: s.config.RenoRTTScalingAggression,
+			RenoRTTScalingMaxFactor:  s.config.RenoRTTScalingMaxFactor,
+		},
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
@@ -438,7 +442,7 @@ var newClientConnection = func(
 	)
 	s.ctx, s.ctxCancel = context.WithCancelCause(ctx)
 	s.preSetup()
-	s.sentPacketHandler = ackhandler.NewSentPacketHandler(
+	s.sentPacketHandler = ackhandler.NewSentPacketHandlerWithCongestionConfig(
 		initialPacketNumber,
 		protocol.ByteCount(s.config.InitialPacketSize),
 		s.rttStats,
@@ -449,6 +453,10 @@ var newClientConnection = func(
 		s.perspective,
 		s.qlogger,
 		s.logger,
+		ackhandler.CongestionControlConfig{
+			RenoRTTScalingAggression: s.config.RenoRTTScalingAggression,
+			RenoRTTScalingMaxFactor:  s.config.RenoRTTScalingMaxFactor,
+		},
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	oneRTTStream := newCryptoStream()
