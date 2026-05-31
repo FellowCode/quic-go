@@ -1,6 +1,8 @@
 package congestion
 
 import (
+	"time"
+
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
 )
@@ -12,6 +14,65 @@ import (
 type RenoRTTScalingConfig struct {
 	Aggression float64
 	MaxFactor  float64
+}
+
+type CongestionControlAlgorithm int
+
+const (
+	CongestionControlReno CongestionControlAlgorithm = iota
+	CongestionControlCubic
+	CongestionControlAdaptiveBDP
+)
+
+type CwndTuningConfig struct {
+	Enable bool
+
+	Algorithm CongestionControlAlgorithm
+
+	InitialWindowPackets uint32
+	MinWindowPackets     uint32
+	MaxWindowPackets     uint32
+
+	WindowGain float64
+
+	MaxProbeRateBps      uint64
+	StartupTargetRateBps uint64
+
+	StartupTargetDuration time.Duration
+	StartupPacingGain     float64
+	StartupCwndGain       float64
+
+	ProbeUpGain      float64
+	ProbeDownGain    float64
+	CruisePacingGain float64
+	CruiseCwndGain   float64
+
+	QueueTarget           time.Duration
+	QueuePersistentRounds uint32
+
+	LossTarget             float64
+	EmergencyLossThreshold float64
+
+	BandwidthFilterRounds uint32
+	DownshiftRounds       uint32
+	DownshiftRatio        float64
+
+	MinRTTFilterWindow time.Duration
+	ProbeInterval      time.Duration
+
+	PacingMargin float64
+}
+
+type RateSample struct {
+	DeliveryRate   protocol.ByteCount // bytes/sec
+	AckedBytes     protocol.ByteCount
+	LostBytes      protocol.ByteCount
+	DeliveredBytes protocol.ByteCount
+	PriorInFlight  protocol.ByteCount
+	Interval       time.Duration
+	RTT            time.Duration
+	AppLimited     bool
+	IsValid        bool
 }
 
 // A SendAlgorithm performs congestion control
@@ -33,4 +94,28 @@ type SendAlgorithmWithDebugInfos interface {
 	InSlowStart() bool
 	InRecovery() bool
 	GetCongestionWindow() protocol.ByteCount
+}
+
+// SendAlgorithmWithRateSample receives delivery-rate measurements from the ACK handler.
+type SendAlgorithmWithRateSample interface {
+	SendAlgorithm
+	OnPacketAckedWithRateSample(
+		number protocol.PacketNumber,
+		ackedBytes protocol.ByteCount,
+		priorInFlight protocol.ByteCount,
+		eventTime monotime.Time,
+		sample RateSample,
+	)
+}
+
+// SendAlgorithmWithECN receives validated ECN-CE congestion signals.
+type SendAlgorithmWithECN interface {
+	SendAlgorithm
+	OnECNCongestionEvent(priorInFlight protocol.ByteCount, eventTime monotime.Time)
+}
+
+// SendAlgorithmWithPersistentCongestion receives explicit persistent congestion signals.
+type SendAlgorithmWithPersistentCongestion interface {
+	SendAlgorithm
+	OnPersistentCongestion(eventTime monotime.Time)
 }

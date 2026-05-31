@@ -54,6 +54,45 @@ func validateConfig(config *Config) error {
 	if config.RenoRTTScalingMaxFactor > 0 && config.RenoRTTScalingMaxFactor < 1 {
 		config.RenoRTTScalingMaxFactor = 1
 	}
+	if config.CwndTuning.WindowGain < 0 {
+		config.CwndTuning.WindowGain = 0
+	}
+	if config.CwndTuning.Algorithm < CongestionControlReno || config.CwndTuning.Algorithm > CongestionControlAdaptiveBDP {
+		config.CwndTuning.Algorithm = CongestionControlReno
+	}
+	if config.CwndTuning.StartupPacingGain < 0 {
+		config.CwndTuning.StartupPacingGain = 0
+	}
+	if config.CwndTuning.StartupCwndGain < 0 {
+		config.CwndTuning.StartupCwndGain = 0
+	}
+	if config.CwndTuning.ProbeUpGain < 0 {
+		config.CwndTuning.ProbeUpGain = 0
+	}
+	if config.CwndTuning.ProbeDownGain < 0 {
+		config.CwndTuning.ProbeDownGain = 0
+	}
+	if config.CwndTuning.CruisePacingGain < 0 {
+		config.CwndTuning.CruisePacingGain = 0
+	}
+	if config.CwndTuning.CruiseCwndGain < 0 {
+		config.CwndTuning.CruiseCwndGain = 0
+	}
+	if config.CwndTuning.LossTarget < 0 {
+		config.CwndTuning.LossTarget = 0
+	}
+	if config.CwndTuning.EmergencyLossThreshold < 0 {
+		config.CwndTuning.EmergencyLossThreshold = 0
+	}
+	if config.CwndTuning.DownshiftRatio < 0 {
+		config.CwndTuning.DownshiftRatio = 0
+	}
+	if config.CwndTuning.PacingMargin < 0 {
+		config.CwndTuning.PacingMargin = 0
+	}
+	if config.CwndTuning.PacingMargin > 0.99 {
+		config.CwndTuning.PacingMargin = 0.99
+	}
 	// check that all QUIC versions are actually supported
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
@@ -132,6 +171,7 @@ func populateConfig(config *Config) *Config {
 		InitialPacketSize:                initialPacketSize,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
+		CwndTuning:                       config.CwndTuning,
 		RenoRTTScalingAggression:         config.RenoRTTScalingAggression,
 		RenoRTTScalingMaxFactor:          config.RenoRTTScalingMaxFactor,
 		Allow0RTT:                        config.Allow0RTT,

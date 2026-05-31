@@ -60,7 +60,8 @@ type cubicSender struct {
 	initialCongestionWindow    protocol.ByteCount
 	initialMaxCongestionWindow protocol.ByteCount
 
-	maxDatagramSize protocol.ByteCount
+	maxDatagramSize            protocol.ByteCount
+	maxCongestionWindowPackets protocol.ByteCount
 
 	lastState qlog.CongestionState
 	qlogger   qlogwriter.Recorder
@@ -83,14 +84,42 @@ func NewCubicSender(
 	reno bool,
 	qlogger qlogwriter.Recorder,
 ) *cubicSender {
+	return NewCubicSenderWithTuning(
+		clock,
+		rttStats,
+		connStats,
+		initialMaxDatagramSize,
+		reno,
+		CwndTuningConfig{},
+		qlogger,
+	)
+}
+
+func NewCubicSenderWithTuning(
+	clock Clock,
+	rttStats *utils.RTTStats,
+	connStats *utils.ConnectionStats,
+	initialMaxDatagramSize protocol.ByteCount,
+	reno bool,
+	tuning CwndTuningConfig,
+	qlogger qlogwriter.Recorder,
+) *cubicSender {
+	initialPackets := protocol.ByteCount(initialCongestionWindow)
+	if tuning.Enable && tuning.InitialWindowPackets > 0 {
+		initialPackets = protocol.ByteCount(tuning.InitialWindowPackets)
+	}
+	maxPackets := protocol.ByteCount(protocol.MaxCongestionWindowPackets)
+	if tuning.Enable && tuning.MaxWindowPackets > 0 {
+		maxPackets = max(maxPackets, protocol.ByteCount(tuning.MaxWindowPackets))
+	}
 	return newCubicSender(
 		clock,
 		rttStats,
 		connStats,
 		reno,
 		initialMaxDatagramSize,
-		initialCongestionWindow*initialMaxDatagramSize,
-		protocol.MaxCongestionWindowPackets*initialMaxDatagramSize,
+		initialPackets*initialMaxDatagramSize,
+		maxPackets*initialMaxDatagramSize,
 		qlogger,
 	)
 }
@@ -120,6 +149,7 @@ func newCubicSender(
 		reno:                       reno,
 		qlogger:                    qlogger,
 		maxDatagramSize:            initialMaxDatagramSize,
+		maxCongestionWindowPackets: initialMaxCongestionWindow / initialMaxDatagramSize,
 	}
 	c.pacer = newPacer(c.BandwidthEstimate)
 	if c.qlogger != nil {
@@ -141,7 +171,11 @@ func (c *cubicSender) HasPacingBudget(now monotime.Time) bool {
 }
 
 func (c *cubicSender) maxCongestionWindow() protocol.ByteCount {
-	return c.maxDatagramSize * protocol.MaxCongestionWindowPackets
+	maxPackets := c.maxCongestionWindowPackets
+	if maxPackets == 0 {
+		maxPackets = protocol.MaxCongestionWindowPackets
+	}
+	return c.maxDatagramSize * maxPackets
 }
 
 func (c *cubicSender) minCongestionWindow() protocol.ByteCount {

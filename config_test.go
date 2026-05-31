@@ -128,6 +128,34 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "EnableStreamResetPartialDelivery":
 			f.Set(reflect.ValueOf(true))
+		case "CwndTuning":
+			f.Set(reflect.ValueOf(CwndTuning{
+				Enable:                 true,
+				Algorithm:              CongestionControlAdaptiveBDP,
+				InitialWindowPackets:   32,
+				MinWindowPackets:       2,
+				MaxWindowPackets:       8000,
+				WindowGain:             1.1,
+				MaxProbeRateBps:        100_000_000,
+				StartupTargetRateBps:   100_000_000,
+				StartupTargetDuration:  5 * time.Second,
+				StartupPacingGain:      2.0,
+				StartupCwndGain:        2.0,
+				ProbeUpGain:            1.25,
+				ProbeDownGain:          0.9,
+				CruisePacingGain:       1.0,
+				CruiseCwndGain:         1.5,
+				QueueTarget:            25 * time.Millisecond,
+				QueuePersistentRounds:  2,
+				LossTarget:             0.005,
+				EmergencyLossThreshold: 0.02,
+				BandwidthFilterRounds:  6,
+				DownshiftRounds:        2,
+				DownshiftRatio:         0.85,
+				MinRTTFilterWindow:     10 * time.Second,
+				ProbeInterval:          5 * time.Second,
+				PacingMargin:           0.01,
+			}))
 		case "RenoRTTScalingAggression":
 			f.Set(reflect.ValueOf(2.5))
 		case "RenoRTTScalingMaxFactor":
