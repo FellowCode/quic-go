@@ -225,12 +225,12 @@ func (s *adaptiveBDPSender) OnPacketAckedWithRateSample(
 	s.updateMinRTT(sample.RTT, eventTime)
 	s.updateRound(sample, priorInFlight, eventTime)
 
-	s.updateBandwidth(sample)
+	s.updateBandwidth(sample, priorInFlight)
 
-	if s.shouldEnterProbeDown(sample) {
+	if s.shouldEnterProbeDown(sample, priorInFlight) {
 		s.enterState(adaptiveBDPProbeDown, eventTime)
 	}
-	if s.state == adaptiveBDPStartup && (s.fullBwReached || s.shouldEnterProbeDown(sample)) {
+	if s.state == adaptiveBDPStartup && (s.fullBwReached || s.shouldEnterProbeDown(sample, priorInFlight)) {
 		s.enterState(adaptiveBDPDrain, eventTime)
 	}
 	if s.state == adaptiveBDPDrain {
@@ -264,10 +264,13 @@ func (s *adaptiveBDPSender) OnPacketAckedWithRateSample(
 	}
 }
 
-func (s *adaptiveBDPSender) OnCongestionEvent(_ protocol.PacketNumber, lostBytes, _ protocol.ByteCount) {
+func (s *adaptiveBDPSender) OnCongestionEvent(_ protocol.PacketNumber, lostBytes, priorInFlight protocol.ByteCount) {
 	s.connStats.PacketsLost.Add(1)
 	s.connStats.BytesLost.Add(uint64(lostBytes))
 	s.lostBytesThisRound += lostBytes
+	if !s.canReduceWindow(priorInFlight) {
+		return
+	}
 	lossRate := s.lossRate()
 	if lossRate > s.emergencyLossThreshold() {
 		s.congestionWindow = max(s.minCongestionWindow, protocol.ByteCount(float64(s.congestionWindow)*0.7))
@@ -286,7 +289,10 @@ func (s *adaptiveBDPSender) OnCongestionEvent(_ protocol.PacketNumber, lostBytes
 	}
 }
 
-func (s *adaptiveBDPSender) OnECNCongestionEvent(_ protocol.ByteCount, eventTime monotime.Time) {
+func (s *adaptiveBDPSender) OnECNCongestionEvent(priorInFlight protocol.ByteCount, eventTime monotime.Time) {
+	if !s.canReduceWindow(priorInFlight) {
+		return
+	}
 	s.enterState(adaptiveBDPProbeDown, eventTime)
 	if s.bw > 0 {
 		s.shortBw = max(1, uint64(float64(s.bw)*s.probeDownGain()))
@@ -309,10 +315,6 @@ func (s *adaptiveBDPSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 		s.bw = min(s.bw, s.shortBw)
 	}
 	s.updatePacingRate()
-	target := s.targetCwnd()
-	if s.congestionWindow > target {
-		s.congestionWindow = max(target, s.minCongestionWindow)
-	}
 }
 
 func (s *adaptiveBDPSender) OnPersistentCongestion(eventTime monotime.Time) {
@@ -404,7 +406,7 @@ func (s *adaptiveBDPSender) updateRound(sample RateSample, priorInFlight protoco
 	s.lostBytesThisRound = 0
 }
 
-func (s *adaptiveBDPSender) updateBandwidth(sample RateSample) {
+func (s *adaptiveBDPSender) updateBandwidth(sample RateSample, priorInFlight protocol.ByteCount) {
 	if !sample.IsValid || sample.DeliveryRate == 0 {
 		if s.bw == 0 {
 			s.bootstrapBandwidth()
@@ -419,8 +421,10 @@ func (s *adaptiveBDPSender) updateBandwidth(sample RateSample) {
 			s.bwFilter.Update(s.roundCount, sampleBW)
 		}
 	} else {
-		s.bwFilter.Update(s.roundCount, sampleBW)
-		s.maxBw = max(s.maxBw, s.bwFilter.Max(s.roundCount))
+		if s.maxBw == 0 || sampleBW >= s.maxBw || s.canReduceWindow(priorInFlight) {
+			s.bwFilter.Update(s.roundCount, sampleBW)
+			s.maxBw = max(s.maxBw, s.bwFilter.Max(s.roundCount))
+		}
 	}
 
 	activeBW := s.maxBw
@@ -431,7 +435,7 @@ func (s *adaptiveBDPSender) updateBandwidth(sample RateSample) {
 		activeBW = sampleBW
 	}
 
-	if !sample.AppLimited && activeBW > 0 && float64(sampleBW) < float64(activeBW)*s.downshiftRatio() {
+	if !sample.AppLimited && s.canReduceWindow(priorInFlight) && activeBW > 0 && float64(sampleBW) < float64(activeBW)*s.downshiftRatio() {
 		s.downshiftRounds++
 		if s.downshiftRounds >= s.downshiftRoundsTarget() {
 			s.shortBw = max(sampleBW, 1)
@@ -501,7 +505,7 @@ func (s *adaptiveBDPSender) setCwndFromTarget(ackedBytes, priorInFlight protocol
 		}
 	} else if s.congestionWindow < target {
 		s.congestionWindow += min(ackedBytes, target-s.congestionWindow)
-	} else if s.state == adaptiveBDPProbeDown || s.shouldEnterProbeDown(RateSample{}) || priorInFlight > target {
+	} else if s.canReduceWindow(priorInFlight) && (s.state == adaptiveBDPProbeDown || priorInFlight > target) {
 		s.congestionWindow = max(target, s.minCongestionWindow)
 	}
 	s.congestionWindow = clampCwnd(s.congestionWindow, s.minCongestionWindow, s.maxCongestionWindow)
@@ -515,8 +519,12 @@ func (s *adaptiveBDPSender) queueDelay() time.Duration {
 	return srtt - s.minRTT
 }
 
-func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample) bool {
-	if s.queueDelay() > s.queueTarget() {
+func (s *adaptiveBDPSender) canReduceWindow(priorInFlight protocol.ByteCount) bool {
+	return s.queueDelay() > s.queueTarget() && priorInFlight < s.congestionWindow
+}
+
+func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample, priorInFlight protocol.ByteCount) bool {
+	if s.canReduceWindow(priorInFlight) {
 		s.queueHighRounds++
 	} else {
 		s.queueHighRounds = 0
@@ -524,10 +532,10 @@ func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample) bool {
 	if s.queueHighRounds >= s.queuePersistentRounds() {
 		return true
 	}
-	if s.lossRate() > s.lossTarget() {
+	if s.canReduceWindow(priorInFlight) && s.lossRate() > s.lossTarget() {
 		return true
 	}
-	if sample.IsValid && !sample.AppLimited && s.bw > 0 && float64(sample.DeliveryRate) < float64(s.bw)*s.downshiftRatio() {
+	if s.canReduceWindow(priorInFlight) && sample.IsValid && !sample.AppLimited && s.bw > 0 && float64(sample.DeliveryRate) < float64(s.bw)*s.downshiftRatio() {
 		return true
 	}
 	return false
