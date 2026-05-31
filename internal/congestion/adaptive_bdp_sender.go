@@ -112,6 +112,11 @@ type adaptiveBDPSender struct {
 	lostBytesThisRound  protocol.ByteCount
 	ackedBytesThisRound protocol.ByteCount
 
+	lastLossCutbackRound      uint64
+	hasLastLossCutbackRound   bool
+	lastEmergencyCutbackRound uint64
+	hasLastEmergencyCutback   bool
+
 	cfg CwndTuningConfig
 
 	lastStateChange monotime.Time
@@ -271,21 +276,32 @@ func (s *adaptiveBDPSender) OnCongestionEvent(_ protocol.PacketNumber, lostBytes
 	if !s.canReduceWindow(priorInFlight) {
 		return
 	}
+	if !s.canLossCutbackThisRound() {
+		return
+	}
 	lossRate := s.lossRate()
-	if lossRate > s.emergencyLossThreshold() {
+	cutback := false
+	if lossRate > s.emergencyLossThreshold() && s.canEmergencyCutbackThisRound() {
 		s.congestionWindow = max(s.minCongestionWindow, protocol.ByteCount(float64(s.congestionWindow)*0.7))
 		s.bw = min(s.bw, uint64(float64(max(1, s.bw))*s.probeDownGain()))
+		s.markEmergencyCutbackRound()
+		cutback = true
 	}
 	if lossRate > s.lossTarget() {
 		s.enterState(adaptiveBDPProbeDown, s.clock.Now())
 		if s.bw > 0 {
 			s.shortBw = max(1, uint64(float64(s.bw)*s.probeDownGain()))
 		}
+		cutback = true
 	}
 	s.updatePacingRate()
 	target := s.targetCwnd()
 	if s.congestionWindow > target {
 		s.congestionWindow = max(target, s.minCongestionWindow)
+		cutback = true
+	}
+	if cutback {
+		s.markLossCutbackRound()
 	}
 }
 
@@ -521,6 +537,24 @@ func (s *adaptiveBDPSender) queueDelay() time.Duration {
 
 func (s *adaptiveBDPSender) canReduceWindow(priorInFlight protocol.ByteCount) bool {
 	return s.queueDelay() > s.queueTarget() && priorInFlight < s.congestionWindow
+}
+
+func (s *adaptiveBDPSender) canLossCutbackThisRound() bool {
+	return !s.hasLastLossCutbackRound || s.lastLossCutbackRound != s.roundCount
+}
+
+func (s *adaptiveBDPSender) markLossCutbackRound() {
+	s.lastLossCutbackRound = s.roundCount
+	s.hasLastLossCutbackRound = true
+}
+
+func (s *adaptiveBDPSender) canEmergencyCutbackThisRound() bool {
+	return !s.hasLastEmergencyCutback || s.lastEmergencyCutbackRound != s.roundCount
+}
+
+func (s *adaptiveBDPSender) markEmergencyCutbackRound() {
+	s.lastEmergencyCutbackRound = s.roundCount
+	s.hasLastEmergencyCutback = true
 }
 
 func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample, priorInFlight protocol.ByteCount) bool {
