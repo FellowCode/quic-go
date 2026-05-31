@@ -200,6 +200,39 @@ func TestLossTriggersProbeDown(t *testing.T) {
 	require.LessOrEqual(t, s.congestionWindow, oldCwnd)
 }
 
+func TestLossCutbackLimitedToOncePerRound(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(250*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                 true,
+			LossTarget:             0.005,
+			EmergencyLossThreshold: 1.0,
+		},
+	)
+	s.state = adaptiveBDPProbeBW
+	s.minRTT = 200 * time.Millisecond
+	s.bw = mbitToBytesPerSecond(100)
+	s.maxBw = s.bw
+	s.congestionWindow = 4000 * 1280
+	s.ackedBytesThisRound = 100_000
+
+	s.OnCongestionEvent(1, 2_000, 64*1280)
+	cwndAfterFirstLoss := s.congestionWindow
+	shortBwAfterFirstLoss := s.shortBw
+	require.Equal(t, adaptiveBDPProbeDown, s.state)
+	require.True(t, s.hasLastLossCutbackRound)
+
+	s.OnCongestionEvent(2, 50_000, 64*1280)
+	require.Equal(t, cwndAfterFirstLoss, s.congestionWindow)
+	require.Equal(t, shortBwAfterFirstLoss, s.shortBw)
+}
+
 func TestEmergencyLoss(t *testing.T) {
 	var clock mockClock
 	rttStats := utils.NewRTTStats()
@@ -218,6 +251,38 @@ func TestEmergencyLoss(t *testing.T) {
 	s.OnCongestionEvent(1, 20_000, 64*1280)
 	require.Less(t, s.congestionWindow, oldCwnd)
 	require.GreaterOrEqual(t, s.congestionWindow, s.minCongestionWindow)
+}
+
+func TestEmergencyLossCutbackLimitedToOncePerRound(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(250*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                 true,
+			LossTarget:             1.0,
+			EmergencyLossThreshold: 0.02,
+		},
+	)
+	s.state = adaptiveBDPProbeBW
+	s.minRTT = 200 * time.Millisecond
+	s.bw = mbitToBytesPerSecond(100)
+	s.maxBw = s.bw
+	s.congestionWindow = 128 * 1280
+	s.ackedBytesThisRound = 10_000
+
+	s.OnCongestionEvent(1, 20_000, 64*1280)
+	cwndAfterFirstLoss := s.congestionWindow
+	bwAfterFirstLoss := s.bw
+	require.True(t, s.hasLastEmergencyCutback)
+
+	s.OnCongestionEvent(2, 20_000, 64*1280)
+	require.Equal(t, cwndAfterFirstLoss, s.congestionWindow)
+	require.Equal(t, bwAfterFirstLoss, s.bw)
 }
 
 func TestLowDeliveryWithoutQueueDoesNotReduceWindow(t *testing.T) {
