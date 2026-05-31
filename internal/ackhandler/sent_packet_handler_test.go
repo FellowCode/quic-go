@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go/internal/congestion"
 	"github.com/quic-go/quic-go/internal/mocks"
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -36,6 +37,46 @@ func (h *customFrameHandler) OnAcked(f wire.Frame) {
 	if h.onAcked != nil {
 		h.onAcked(f)
 	}
+}
+
+type captureRateSampleAlgorithm struct {
+	cwnd       protocol.ByteCount
+	numbers    []protocol.PacketNumber
+	ackedBytes []protocol.ByteCount
+	samples    []congestion.RateSample
+}
+
+func (a *captureRateSampleAlgorithm) TimeUntilSend(protocol.ByteCount) monotime.Time { return 0 }
+func (a *captureRateSampleAlgorithm) HasPacingBudget(monotime.Time) bool             { return true }
+func (a *captureRateSampleAlgorithm) OnPacketSent(monotime.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+}
+func (a *captureRateSampleAlgorithm) CanSend(protocol.ByteCount) bool { return true }
+func (a *captureRateSampleAlgorithm) MaybeExitSlowStart()             {}
+func (a *captureRateSampleAlgorithm) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, monotime.Time) {
+}
+func (a *captureRateSampleAlgorithm) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
+}
+func (a *captureRateSampleAlgorithm) OnRetransmissionTimeout(bool) {}
+func (a *captureRateSampleAlgorithm) SetMaxDatagramSize(protocol.ByteCount) {
+}
+func (a *captureRateSampleAlgorithm) InSlowStart() bool { return false }
+func (a *captureRateSampleAlgorithm) InRecovery() bool  { return false }
+func (a *captureRateSampleAlgorithm) GetCongestionWindow() protocol.ByteCount {
+	if a.cwnd == 0 {
+		return 10 * 1200
+	}
+	return a.cwnd
+}
+func (a *captureRateSampleAlgorithm) OnPacketAckedWithRateSample(
+	number protocol.PacketNumber,
+	ackedBytes protocol.ByteCount,
+	_ protocol.ByteCount,
+	_ monotime.Time,
+	sample congestion.RateSample,
+) {
+	a.numbers = append(a.numbers, number)
+	a.ackedBytes = append(a.ackedBytes, ackedBytes)
+	a.samples = append(a.samples, sample)
 }
 
 type packetTracker struct {
@@ -1066,6 +1107,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 		utils.DefaultLogger,
 	)
 	sph.(*sentPacketHandler).congestion = cong
+	cong.EXPECT().GetCongestionWindow().Return(protocol.ByteCount(10_000)).AnyTimes()
 
 	var packets packetTracker
 	// Send the first 5 packets: not congestion-limited, not pacing-limited.
@@ -1082,6 +1124,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 		require.Equal(t, SendAny, sph.SendMode(now))
 		pn := sph.PopPacketNumber(protocol.EncryptionInitial)
 		bytesInFlight += 1000
+		cong.EXPECT().HasPacingBudget(now).Return(true)
 		cong.EXPECT().OnPacketSent(now, bytesInFlight, pn, protocol.ByteCount(1000), true)
 		sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.EncryptionInitial, protocol.ECNNon, 1000, i == 1, false)
 		pns = append(pns, pn)
@@ -1114,7 +1157,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 		cong.EXPECT().MaybeExitSlowStart(),
 		cong.EXPECT().OnCongestionEvent(pns[0], protocol.ByteCount(1000), protocol.ByteCount(5000)),
 		cong.EXPECT().OnPacketAcked(pns[2], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
-		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
+		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(1000), protocol.ByteCount(4000), ackTime),
 	)
 	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[2], pns[3])}, protocol.EncryptionInitial, ackTime)
 	require.NoError(t, err)
@@ -1135,6 +1178,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	// send another packet to check that bytes_in_flight was correctly adjusted
 	now = timeout.Add(100 * time.Millisecond)
 	pn := sph.PopPacketNumber(protocol.EncryptionInitial)
+	cong.EXPECT().HasPacingBudget(now).Return(true)
 	cong.EXPECT().OnPacketSent(now, protocol.ByteCount(2000), pn, protocol.ByteCount(1000), true)
 	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.EncryptionInitial, protocol.ECNNon, 1000, false, false)
 }
@@ -1250,6 +1294,8 @@ func TestSentPacketHandlerECN(t *testing.T) {
 	cong.EXPECT().OnPacketSent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 	cong.EXPECT().OnPacketAcked(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 	cong.EXPECT().MaybeExitSlowStart().AnyTimes()
+	cong.EXPECT().HasPacingBudget(gomock.Any()).AnyTimes()
+	cong.EXPECT().GetCongestionWindow().Return(protocol.ByteCount(10_000)).AnyTimes()
 	ecnHandler := NewMockECNHandler(mockCtrl)
 	sph := NewSentPacketHandler(
 		0,
@@ -1702,6 +1748,166 @@ func TestSentPacketHandlerSpuriousLoss(t *testing.T) {
 		},
 		eventRecorder.Events(qlog.SpuriousLoss{}),
 	)
+}
+
+func TestRateSamplerProducesSample(t *testing.T) {
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	algo := &captureRateSampleAlgorithm{}
+	sph.congestion = algo
+
+	now := monotime.Now()
+	pn1 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn1, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	pn2 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(10*time.Millisecond), pn2, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pn1, pn2)}, protocol.Encryption1RTT, now.Add(110*time.Millisecond))
+	require.NoError(t, err)
+	require.NotEmpty(t, algo.samples)
+	last := algo.samples[len(algo.samples)-1]
+	require.True(t, last.IsValid)
+	require.Greater(t, last.DeliveryRate, protocol.ByteCount(0))
+}
+
+func TestRateSamplerMarksAppLimited(t *testing.T) {
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	algo := &captureRateSampleAlgorithm{}
+	sph.congestion = algo
+
+	now := monotime.Now()
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pn)}, protocol.Encryption1RTT, now.Add(100*time.Millisecond))
+	require.NoError(t, err)
+	require.NotEmpty(t, algo.samples)
+	require.True(t, algo.samples[len(algo.samples)-1].AppLimited)
+}
+
+func TestRateSamplerUsesBestSampleFromAckBatch(t *testing.T) {
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	algo := &captureRateSampleAlgorithm{cwnd: 1200}
+	sph.congestion = algo
+
+	now := monotime.Now()
+	pn1 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn1, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	pn2 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(10*time.Millisecond), pn2, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	pn3 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(20*time.Millisecond), pn3, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pn1, pn2, pn3)}, protocol.Encryption1RTT, now.Add(120*time.Millisecond))
+	require.NoError(t, err)
+	require.Len(t, algo.samples, 1)
+	require.Equal(t, pn3, algo.numbers[0])
+	require.Equal(t, protocol.ByteCount(3600), algo.ackedBytes[0])
+	require.False(t, algo.samples[0].AppLimited)
+	require.True(t, algo.samples[0].IsValid)
+}
+
+func TestAdaptiveBDPSelectedFromConfig(t *testing.T) {
+	sph := NewSentPacketHandlerWithCongestionConfig(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+		CongestionControlConfig{
+			CwndTuning: congestion.CwndTuningConfig{
+				Enable:    true,
+				Algorithm: congestion.CongestionControlAdaptiveBDP,
+			},
+		},
+	).(*sentPacketHandler)
+	_, ok := sph.congestion.(interface{ PacingRateBytesPerSecond() uint64 })
+	require.True(t, ok)
+}
+
+func TestMigrationPreservesAdaptiveBDPConfig(t *testing.T) {
+	sph := NewSentPacketHandlerWithCongestionConfig(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+		CongestionControlConfig{
+			CwndTuning: congestion.CwndTuningConfig{
+				Enable:    true,
+				Algorithm: congestion.CongestionControlAdaptiveBDP,
+			},
+		},
+	).(*sentPacketHandler)
+
+	sph.MigratedPath(monotime.Now(), 1200)
+	_, ok := sph.congestion.(interface{ PacingRateBytesPerSecond() uint64 })
+	require.True(t, ok)
+}
+
+func TestDynamicOutstandingPacketLimitForLargeAdaptiveCwnd(t *testing.T) {
+	sph := NewSentPacketHandlerWithCongestionConfig(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+		CongestionControlConfig{
+			CwndTuning: congestion.CwndTuningConfig{
+				Enable:           true,
+				Algorithm:        congestion.CongestionControlAdaptiveBDP,
+				MaxWindowPackets: 20_000,
+			},
+		},
+	).(*sentPacketHandler)
+	require.Greater(t, sph.maxOutstandingSentPackets(), protocol.MaxOutstandingSentPackets)
+	require.Greater(t, sph.maxTrackedSentPackets(), protocol.MaxTrackedSentPackets)
 }
 
 func BenchmarkSendAndAcknowledge(b *testing.B) {

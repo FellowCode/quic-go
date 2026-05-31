@@ -152,3 +152,29 @@ func BenchmarkPacer(b *testing.B) {
 		}
 	}
 }
+
+func TestAdaptivePacerUsesExplicitRate(t *testing.T) {
+	var rate uint64 = 12_500_000 // 100 Mbit/s
+	p := newPacerWithRate(func() uint64 { return rate })
+	now := monotime.Now()
+	for p.Budget(now) > 0 {
+		p.SentPacket(now, initialMaxDatagramSize)
+	}
+	next := p.TimeUntilSend()
+	require.NotZero(t, next)
+	require.Greater(t, p.Budget(next), protocol.ByteCount(0))
+}
+
+func TestAdaptivePacerProbeDownReducesBudget(t *testing.T) {
+	var rate uint64 = 12_500_000 // 100 Mbit/s
+	p := newPacerWithRate(func() uint64 { return rate })
+	now := monotime.Now()
+	for p.Budget(now) > 0 {
+		p.SentPacket(now, initialMaxDatagramSize)
+	}
+
+	highBudget := p.Budget(now.Add(10 * time.Millisecond))
+	rate = 3_750_000 // 30 Mbit/s
+	lowBudget := p.Budget(now.Add(10 * time.Millisecond))
+	require.Less(t, lowBudget, highBudget)
+}

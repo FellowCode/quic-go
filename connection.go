@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
+	"github.com/quic-go/quic-go/internal/congestion"
 	"github.com/quic-go/quic-go/internal/flowcontrol"
 	"github.com/quic-go/quic-go/internal/handshake"
 	"github.com/quic-go/quic-go/internal/monotime"
@@ -324,6 +325,7 @@ var newConnection = func(
 		ackhandler.CongestionControlConfig{
 			RenoRTTScalingAggression: s.config.RenoRTTScalingAggression,
 			RenoRTTScalingMaxFactor:  s.config.RenoRTTScalingMaxFactor,
+			CwndTuning:               toCongestionCwndTuningConfig(s.config.CwndTuning),
 		},
 	)
 	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
@@ -457,6 +459,7 @@ var newClientConnection = func(
 		ackhandler.CongestionControlConfig{
 			RenoRTTScalingAggression: s.config.RenoRTTScalingAggression,
 			RenoRTTScalingMaxFactor:  s.config.RenoRTTScalingMaxFactor,
+			CwndTuning:               toCongestionCwndTuningConfig(s.config.CwndTuning),
 		},
 	)
 	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
@@ -3152,4 +3155,41 @@ func (c *Conn) NextConnection(ctx context.Context) (*Conn, error) {
 // connection ID length), and the size of the encryption tag.
 func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
 	return mtu - 1 /* type byte */ - 20 /* maximum connection ID length */ - 16 /* tag size */
+}
+
+func toCongestionCwndTuningConfig(c CwndTuning) congestion.CwndTuningConfig {
+	algorithm := congestion.CongestionControlReno
+	switch c.Algorithm {
+	case CongestionControlCubic:
+		algorithm = congestion.CongestionControlCubic
+	case CongestionControlAdaptiveBDP:
+		algorithm = congestion.CongestionControlAdaptiveBDP
+	}
+	return congestion.CwndTuningConfig{
+		Enable:                 c.Enable,
+		Algorithm:              algorithm,
+		InitialWindowPackets:   c.InitialWindowPackets,
+		MinWindowPackets:       c.MinWindowPackets,
+		MaxWindowPackets:       c.MaxWindowPackets,
+		WindowGain:             c.WindowGain,
+		MaxProbeRateBps:        c.MaxProbeRateBps,
+		StartupTargetRateBps:   c.StartupTargetRateBps,
+		StartupTargetDuration:  c.StartupTargetDuration,
+		StartupPacingGain:      c.StartupPacingGain,
+		StartupCwndGain:        c.StartupCwndGain,
+		ProbeUpGain:            c.ProbeUpGain,
+		ProbeDownGain:          c.ProbeDownGain,
+		CruisePacingGain:       c.CruisePacingGain,
+		CruiseCwndGain:         c.CruiseCwndGain,
+		QueueTarget:            c.QueueTarget,
+		QueuePersistentRounds:  c.QueuePersistentRounds,
+		LossTarget:             c.LossTarget,
+		EmergencyLossThreshold: c.EmergencyLossThreshold,
+		BandwidthFilterRounds:  c.BandwidthFilterRounds,
+		DownshiftRounds:        c.DownshiftRounds,
+		DownshiftRatio:         c.DownshiftRatio,
+		MinRTTFilterWindow:     c.MinRTTFilterWindow,
+		ProbeInterval:          c.ProbeInterval,
+		PacingMargin:           c.PacingMargin,
+	}
 }

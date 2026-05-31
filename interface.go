@@ -26,6 +26,53 @@ const (
 	Version2 = protocol.Version2
 )
 
+type CongestionControlAlgorithm int
+
+const (
+	CongestionControlReno CongestionControlAlgorithm = iota
+	CongestionControlCubic
+	CongestionControlAdaptiveBDP
+)
+
+type CwndTuning struct {
+	Enable bool
+
+	Algorithm CongestionControlAlgorithm
+
+	InitialWindowPackets uint32
+	MinWindowPackets     uint32
+	MaxWindowPackets     uint32
+
+	WindowGain float64
+
+	MaxProbeRateBps      uint64
+	StartupTargetRateBps uint64
+
+	StartupTargetDuration time.Duration
+	StartupPacingGain     float64
+	StartupCwndGain       float64
+
+	ProbeUpGain      float64
+	ProbeDownGain    float64
+	CruisePacingGain float64
+	CruiseCwndGain   float64
+
+	QueueTarget           time.Duration
+	QueuePersistentRounds uint32
+
+	LossTarget             float64
+	EmergencyLossThreshold float64
+
+	BandwidthFilterRounds uint32
+	DownshiftRounds       uint32
+	DownshiftRatio        float64
+
+	MinRTTFilterWindow time.Duration
+	ProbeInterval      time.Duration
+
+	PacingMargin float64
+}
+
 // SupportedVersions returns the support versions, sorted in descending order of preference.
 func SupportedVersions() []Version {
 	// clone the slice to prevent the caller from modifying the slice
@@ -175,6 +222,8 @@ type Config struct {
 	// Enable QUIC Stream Resets with Partial Delivery.
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-07.
 	EnableStreamResetPartialDelivery bool
+	// CwndTuning controls congestion control selection and tuning parameters.
+	CwndTuning CwndTuning
 	// RenoRTTScalingAggression enables RTT-dependent Reno CWND aggressiveness.
 	// If set to a positive value, the aggressiveness factor is computed as:
 	// factor = 1 + RenoRTTScalingAggression * (RTT / 1s).
