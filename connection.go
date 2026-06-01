@@ -854,6 +854,76 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 	}
 }
 
+// AdaptiveBDPDebugInfo returns diagnostic state for CongestionControlAdaptiveBDP.
+//
+// The second return value is false when the connection is not using the
+// AdaptiveBDP congestion controller, or when congestion state is not available.
+func (c *Conn) AdaptiveBDPDebugInfo() (AdaptiveBDPDebugInfo, bool) {
+	if c.sentPacketHandler == nil {
+		return AdaptiveBDPDebugInfo{}, false
+	}
+	h, ok := c.sentPacketHandler.(interface {
+		AdaptiveBDPDebugInfo() (congestion.AdaptiveBDPDebugInfo, bool)
+	})
+	if !ok {
+		return AdaptiveBDPDebugInfo{}, false
+	}
+	info, ok := h.AdaptiveBDPDebugInfo()
+	if !ok {
+		return AdaptiveBDPDebugInfo{}, false
+	}
+	return toAdaptiveBDPDebugInfo(info), true
+}
+
+func toAdaptiveBDPDebugInfo(info congestion.AdaptiveBDPDebugInfo) AdaptiveBDPDebugInfo {
+	return AdaptiveBDPDebugInfo{
+		State: info.State,
+
+		CongestionWindow: uint64(info.CongestionWindow),
+		TargetCwnd:       uint64(info.TargetCwnd),
+		MinCwnd:          uint64(info.MinCwnd),
+		MaxCwnd:          uint64(info.MaxCwnd),
+		BDP:              uint64(info.BDP),
+		BytesInFlight:    uint64(info.BytesInFlight),
+		PriorInFlight:    uint64(info.PriorInFlight),
+
+		BandwidthBytesPerSecond:      info.BandwidthBytesPerSecond,
+		MaxBandwidthBytesPerSecond:   info.MaxBandwidthBytesPerSecond,
+		ShortBandwidthBytesPerSecond: info.ShortBandwidthBytesPerSecond,
+		PacingRateBytesPerSecond:     info.PacingRateBytesPerSecond,
+
+		LastDeliveryRateBytesPerSecond: uint64(info.LastDeliveryRateBytesPerSecond),
+		LastDeliveredDelta:             uint64(info.LastDeliveredDelta),
+		LastSampleInterval:             info.LastSampleInterval,
+		LastSampleAckElapsed:           info.LastSampleAckElapsed,
+		LastSampleSendElapsed:          info.LastSampleSendElapsed,
+		LastSampleAppLimited:           info.LastSampleAppLimited,
+		LastSampleValid:                info.LastSampleValid,
+
+		MinRTT:      info.MinRTT,
+		SmoothedRTT: info.SmoothedRTT,
+		QueueDelay:  info.QueueDelay,
+		QueueTarget: info.QueueTarget,
+		PacingGain:  info.PacingGain,
+		CwndGain:    info.CwndGain,
+
+		RoundCount:         info.RoundCount,
+		RoundStart:         info.RoundStart,
+		LastRoundStartTime: info.LastRoundStartTime.ToTime(),
+		QueueHighRounds:    info.QueueHighRounds,
+		DownshiftRounds:    info.DownshiftRounds,
+		FullBwReached:      info.FullBwReached,
+		ProbeUpActive:      info.ProbeUpActive,
+		PacerBudget:        uint64(info.PacerBudget),
+		TimeUntilSend:      info.TimeUntilSend,
+		HasPacingBudget:    info.HasPacingBudget,
+
+		LastStateChangeReason: info.LastStateChangeReason,
+		LastCwndChangeReason:  info.LastCwndChangeReason,
+		LastBWChangeReason:    info.LastBWChangeReason,
+	}
+}
+
 // Time when the connection should time out
 func (c *Conn) nextIdleTimeoutTime() monotime.Time {
 	idleTimeout := max(c.idleTimeout, c.rttStats.PTO(true)*3)

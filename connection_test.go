@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
+	"github.com/quic-go/quic-go/internal/congestion"
 	"github.com/quic-go/quic-go/internal/flowcontrol"
 	"github.com/quic-go/quic-go/internal/handshake"
 	"github.com/quic-go/quic-go/internal/mocks"
@@ -32,6 +33,99 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
+
+type adaptiveDebugSentPacketHandler struct {
+	ackhandler.SentPacketHandler
+	info congestion.AdaptiveBDPDebugInfo
+	ok   bool
+}
+
+func (h adaptiveDebugSentPacketHandler) AdaptiveBDPDebugInfo() (congestion.AdaptiveBDPDebugInfo, bool) {
+	return h.info, h.ok
+}
+
+func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
+	lastRoundStart := monotime.Now()
+	c := &Conn{
+		sentPacketHandler: adaptiveDebugSentPacketHandler{
+			ok: true,
+			info: congestion.AdaptiveBDPDebugInfo{
+				State: "ProbeBW",
+
+				CongestionWindow: 1234,
+				TargetCwnd:       2345,
+				MinCwnd:          1000,
+				MaxCwnd:          9999,
+				BDP:              3456,
+				BytesInFlight:    456,
+				PriorInFlight:    567,
+
+				BandwidthBytesPerSecond:      1_000_000,
+				MaxBandwidthBytesPerSecond:   2_000_000,
+				ShortBandwidthBytesPerSecond: 500_000,
+				PacingRateBytesPerSecond:     900_000,
+
+				LastDeliveryRateBytesPerSecond: 800_000,
+				LastDeliveredDelta:             1200,
+				LastSampleInterval:             150 * time.Millisecond,
+				LastSampleAckElapsed:           140 * time.Millisecond,
+				LastSampleSendElapsed:          10 * time.Millisecond,
+				LastSampleAppLimited:           true,
+				LastSampleValid:                true,
+
+				MinRTT:      100 * time.Millisecond,
+				SmoothedRTT: 120 * time.Millisecond,
+				QueueDelay:  20 * time.Millisecond,
+				QueueTarget: 25 * time.Millisecond,
+				PacingGain:  1.05,
+				CwndGain:    1.5,
+
+				RoundCount:         42,
+				RoundStart:         true,
+				LastRoundStartTime: lastRoundStart,
+				QueueHighRounds:    2,
+				DownshiftRounds:    3,
+				FullBwReached:      true,
+				ProbeUpActive:      true,
+				PacerBudget:        1280,
+				TimeUntilSend:      5 * time.Millisecond,
+				HasPacingBudget:    true,
+
+				LastStateChangeReason: "queue_delay_persistent",
+				LastCwndChangeReason:  "gradual_no_loss_target_cutback",
+				LastBWChangeReason:    "short_bw_downshift_pipe_filled",
+			},
+		},
+	}
+
+	info, ok := c.AdaptiveBDPDebugInfo()
+	require.True(t, ok)
+	require.Equal(t, "ProbeBW", info.State)
+	require.Equal(t, uint64(1234), info.CongestionWindow)
+	require.Equal(t, uint64(2345), info.TargetCwnd)
+	require.Equal(t, uint64(1_000_000), info.BandwidthBytesPerSecond)
+	require.Equal(t, uint64(800_000), info.LastDeliveryRateBytesPerSecond)
+	require.Equal(t, 150*time.Millisecond, info.LastSampleInterval)
+	require.True(t, info.LastSampleAppLimited)
+	require.Equal(t, 100*time.Millisecond, info.MinRTT)
+	require.Equal(t, 1.05, info.PacingGain)
+	require.Equal(t, uint64(42), info.RoundCount)
+	require.Equal(t, lastRoundStart.ToTime(), info.LastRoundStartTime)
+	require.Equal(t, uint64(1280), info.PacerBudget)
+	require.Equal(t, "queue_delay_persistent", info.LastStateChangeReason)
+	require.Equal(t, "gradual_no_loss_target_cutback", info.LastCwndChangeReason)
+	require.Equal(t, "short_bw_downshift_pipe_filled", info.LastBWChangeReason)
+}
+
+func TestAdaptiveBDPDebugInfoPublicAPIReturnsFalseWhenUnavailable(t *testing.T) {
+	info, ok := (&Conn{}).AdaptiveBDPDebugInfo()
+	require.False(t, ok)
+	require.Zero(t, info)
+
+	info, ok = (&Conn{sentPacketHandler: adaptiveDebugSentPacketHandler{ok: false}}).AdaptiveBDPDebugInfo()
+	require.False(t, ok)
+	require.Zero(t, info)
+}
 
 type testConnectionOpt func(*Conn)
 

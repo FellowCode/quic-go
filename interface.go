@@ -73,6 +73,57 @@ type CwndTuning struct {
 	PacingMargin float64
 }
 
+// AdaptiveBDPDebugInfo contains diagnostic state for CongestionControlAdaptiveBDP.
+//
+// It is intended for observability and debugging. The values are snapshots of
+// the congestion controller at the time [Conn.AdaptiveBDPDebugInfo] is called.
+type AdaptiveBDPDebugInfo struct {
+	State string
+
+	CongestionWindow uint64
+	TargetCwnd       uint64
+	MinCwnd          uint64
+	MaxCwnd          uint64
+	BDP              uint64
+	BytesInFlight    uint64
+	PriorInFlight    uint64
+
+	BandwidthBytesPerSecond      uint64
+	MaxBandwidthBytesPerSecond   uint64
+	ShortBandwidthBytesPerSecond uint64
+	PacingRateBytesPerSecond     uint64
+
+	LastDeliveryRateBytesPerSecond uint64
+	LastDeliveredDelta             uint64
+	LastSampleInterval             time.Duration
+	LastSampleAckElapsed           time.Duration
+	LastSampleSendElapsed          time.Duration
+	LastSampleAppLimited           bool
+	LastSampleValid                bool
+
+	MinRTT      time.Duration
+	SmoothedRTT time.Duration
+	QueueDelay  time.Duration
+	QueueTarget time.Duration
+	PacingGain  float64
+	CwndGain    float64
+
+	RoundCount         uint64
+	RoundStart         bool
+	LastRoundStartTime time.Time
+	QueueHighRounds    uint32
+	DownshiftRounds    uint32
+	FullBwReached      bool
+	ProbeUpActive      bool
+	PacerBudget        uint64
+	TimeUntilSend      time.Duration
+	HasPacingBudget    bool
+
+	LastStateChangeReason string
+	LastCwndChangeReason  string
+	LastBWChangeReason    string
+}
+
 // SupportedVersions returns the support versions, sorted in descending order of preference.
 func SupportedVersions() []Version {
 	// clone the slice to prevent the caller from modifying the slice
