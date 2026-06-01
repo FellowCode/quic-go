@@ -68,11 +68,61 @@ type RateSample struct {
 	AckedBytes     protocol.ByteCount
 	LostBytes      protocol.ByteCount
 	DeliveredBytes protocol.ByteCount
+	DeliveredDelta protocol.ByteCount
 	PriorInFlight  protocol.ByteCount
 	Interval       time.Duration
+	AckElapsed     time.Duration
+	SendElapsed    time.Duration
 	RTT            time.Duration
 	AppLimited     bool
 	IsValid        bool
+}
+
+type AdaptiveBDPDebugInfo struct {
+	State string
+
+	CongestionWindow protocol.ByteCount
+	TargetCwnd       protocol.ByteCount
+	MinCwnd          protocol.ByteCount
+	MaxCwnd          protocol.ByteCount
+	BDP              protocol.ByteCount
+	BytesInFlight    protocol.ByteCount
+	PriorInFlight    protocol.ByteCount
+
+	BandwidthBytesPerSecond      uint64
+	MaxBandwidthBytesPerSecond   uint64
+	ShortBandwidthBytesPerSecond uint64
+	PacingRateBytesPerSecond     uint64
+
+	LastDeliveryRateBytesPerSecond protocol.ByteCount
+	LastDeliveredDelta             protocol.ByteCount
+	LastSampleInterval             time.Duration
+	LastSampleAckElapsed           time.Duration
+	LastSampleSendElapsed          time.Duration
+	LastSampleAppLimited           bool
+	LastSampleValid                bool
+
+	MinRTT      time.Duration
+	SmoothedRTT time.Duration
+	QueueDelay  time.Duration
+	QueueTarget time.Duration
+	PacingGain  float64
+	CwndGain    float64
+
+	RoundCount         uint64
+	RoundStart         bool
+	LastRoundStartTime monotime.Time
+	QueueHighRounds    uint32
+	DownshiftRounds    uint32
+	FullBwReached      bool
+	ProbeUpActive      bool
+	PacerBudget        protocol.ByteCount
+	TimeUntilSend      time.Duration
+	HasPacingBudget    bool
+
+	LastStateChangeReason string
+	LastCwndChangeReason  string
+	LastBWChangeReason    string
 }
 
 // A SendAlgorithm performs congestion control
@@ -94,6 +144,11 @@ type SendAlgorithmWithDebugInfos interface {
 	InSlowStart() bool
 	InRecovery() bool
 	GetCongestionWindow() protocol.ByteCount
+}
+
+type SendAlgorithmWithAdaptiveBDPDebugInfo interface {
+	SendAlgorithm
+	AdaptiveBDPDebugInfo() AdaptiveBDPDebugInfo
 }
 
 // SendAlgorithmWithRateSample receives delivery-rate measurements from the ACK handler.
