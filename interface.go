@@ -46,6 +46,7 @@ type CwndTuning struct {
 	WindowGain float64
 
 	MaxProbeRateBps      uint64
+	MinProbeRateBps      uint64
 	StartupTargetRateBps uint64
 
 	StartupTargetDuration time.Duration
@@ -60,12 +61,34 @@ type CwndTuning struct {
 	QueueTarget           time.Duration
 	QueuePersistentRounds uint32
 
-	LossTarget             float64
-	EmergencyLossThreshold float64
+	LossTarget                float64
+	LossGraceRatio            float64
+	LossSoftThreshold         float64
+	LossSevereThreshold       float64
+	EmergencyLossThreshold    float64
+	LossMinBytes              uint64
+	EmergencyLossMinBytes     uint64
+	MinLossSampleBytes        uint64
+	LossEWMAAlpha             float64
+	MaxLossCwndCutNoQueue     float64
+	MaxLossCwndCutWithQueue   float64
+	MinLossCwndCut            float64
+	MaxLossPacingCutNoQueue   float64
+	MaxLossPacingCutWithQueue float64
+	LossCutbackCooldown       time.Duration
+	MildLossPersistentRounds  uint32
 
 	BandwidthFilterRounds uint32
 	DownshiftRounds       uint32
 	DownshiftRatio        float64
+
+	NoCongestionRateFloorFraction float64
+	NoCongestionDownshiftRounds   uint32
+	NoCongestionDownshiftFactor   float64
+	UploadWarmupDuration          time.Duration
+	UploadWarmupBytes             uint64
+	MinDownshiftSampleBytes       uint64
+	CongestionDownshiftRounds     uint32
 
 	MinRTTFilterWindow time.Duration
 	ProbeInterval      time.Duration
@@ -105,8 +128,37 @@ type AdaptiveBDPDebugInfo struct {
 	SmoothedRTT time.Duration
 	QueueDelay  time.Duration
 	QueueTarget time.Duration
+	QueueState  string
 	PacingGain  float64
 	CwndGain    float64
+
+	NegativeBandwidthConfidence    float64
+	HasCongestionEvidence          bool
+	PipeForDownshift               uint64
+	PipeFillThreshold              uint64
+	ActiveBandwidthBeforeDownshift uint64
+	NoCongestionRateFloor          uint64
+	NoQueueLowRounds               uint32
+	NoQueueLowAcked                uint64
+
+	LossRatioRound            float64
+	LossRatioEWMA             float64
+	LostBytesThisRound        uint64
+	AckedBytesThisRound       uint64
+	LossMinBytes              uint64
+	EmergencyLossMinBytes     uint64
+	MinLossSampleBytes        uint64
+	LossGraceRatio            float64
+	LossSevereThreshold       float64
+	EmergencyLossThreshold    float64
+	QueuePressure             float64
+	MildLossRounds            uint32
+	LastLossActionReason      string
+	LastLossCwndMultiplier    float64
+	LastLossPacingMultiplier  float64
+	LastLossCutbackRound      uint64
+	SuppressProbeUpUntilRound uint64
+	SuppressProbeUpReason     string
 
 	RoundCount         uint64
 	RoundStart         bool

@@ -77,8 +77,37 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 				SmoothedRTT: 120 * time.Millisecond,
 				QueueDelay:  20 * time.Millisecond,
 				QueueTarget: 25 * time.Millisecond,
+				QueueState:  "persistent",
 				PacingGain:  1.05,
 				CwndGain:    1.5,
+
+				NegativeBandwidthConfidence:    0.75,
+				HasCongestionEvidence:          true,
+				PipeForDownshift:               3210,
+				PipeFillThreshold:              2889,
+				ActiveBandwidthBeforeDownshift: 2_000_000,
+				NoCongestionRateFloor:          1_500_000,
+				NoQueueLowRounds:               4,
+				NoQueueLowAcked:                8192,
+
+				LossRatioRound:            0.02,
+				LossRatioEWMA:             0.015,
+				LostBytesThisRound:        2560,
+				AckedBytesThisRound:       125_440,
+				LossMinBytes:              2560,
+				EmergencyLossMinBytes:     10_240,
+				MinLossSampleBytes:        65_536,
+				LossGraceRatio:            0.01,
+				LossSevereThreshold:       0.05,
+				EmergencyLossThreshold:    0.10,
+				QueuePressure:             0.5,
+				MildLossRounds:            2,
+				LastLossActionReason:      "proportional_loss_cutback",
+				LastLossCwndMultiplier:    0.98,
+				LastLossPacingMultiplier:  0.99,
+				LastLossCutbackRound:      41,
+				SuppressProbeUpUntilRound: 43,
+				SuppressProbeUpReason:     "proportional_loss_no_queue",
 
 				RoundCount:         42,
 				RoundStart:         true,
@@ -92,8 +121,8 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 				HasPacingBudget:    true,
 
 				LastStateChangeReason: "queue_delay_persistent",
-				LastCwndChangeReason:  "gradual_no_loss_target_cutback",
-				LastBWChangeReason:    "short_bw_downshift_pipe_filled",
+				LastCwndChangeReason:  "gradual_no_congestion_target_cutback_capped",
+				LastBWChangeReason:    "short_bw_downshift_with_congestion_evidence",
 			},
 		},
 	}
@@ -108,13 +137,40 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 	require.Equal(t, 150*time.Millisecond, info.LastSampleInterval)
 	require.True(t, info.LastSampleAppLimited)
 	require.Equal(t, 100*time.Millisecond, info.MinRTT)
+	require.Equal(t, "persistent", info.QueueState)
 	require.Equal(t, 1.05, info.PacingGain)
+	require.Equal(t, 0.75, info.NegativeBandwidthConfidence)
+	require.True(t, info.HasCongestionEvidence)
+	require.Equal(t, uint64(3210), info.PipeForDownshift)
+	require.Equal(t, uint64(2889), info.PipeFillThreshold)
+	require.Equal(t, uint64(2_000_000), info.ActiveBandwidthBeforeDownshift)
+	require.Equal(t, uint64(1_500_000), info.NoCongestionRateFloor)
+	require.Equal(t, uint32(4), info.NoQueueLowRounds)
+	require.Equal(t, uint64(8192), info.NoQueueLowAcked)
+	require.Equal(t, 0.02, info.LossRatioRound)
+	require.Equal(t, 0.015, info.LossRatioEWMA)
+	require.Equal(t, uint64(2560), info.LostBytesThisRound)
+	require.Equal(t, uint64(125_440), info.AckedBytesThisRound)
+	require.Equal(t, uint64(2560), info.LossMinBytes)
+	require.Equal(t, uint64(10_240), info.EmergencyLossMinBytes)
+	require.Equal(t, uint64(65_536), info.MinLossSampleBytes)
+	require.Equal(t, 0.01, info.LossGraceRatio)
+	require.Equal(t, 0.05, info.LossSevereThreshold)
+	require.Equal(t, 0.10, info.EmergencyLossThreshold)
+	require.Equal(t, 0.5, info.QueuePressure)
+	require.Equal(t, uint32(2), info.MildLossRounds)
+	require.Equal(t, "proportional_loss_cutback", info.LastLossActionReason)
+	require.Equal(t, 0.98, info.LastLossCwndMultiplier)
+	require.Equal(t, 0.99, info.LastLossPacingMultiplier)
+	require.Equal(t, uint64(41), info.LastLossCutbackRound)
+	require.Equal(t, uint64(43), info.SuppressProbeUpUntilRound)
+	require.Equal(t, "proportional_loss_no_queue", info.SuppressProbeUpReason)
 	require.Equal(t, uint64(42), info.RoundCount)
 	require.Equal(t, lastRoundStart.ToTime(), info.LastRoundStartTime)
 	require.Equal(t, uint64(1280), info.PacerBudget)
 	require.Equal(t, "queue_delay_persistent", info.LastStateChangeReason)
-	require.Equal(t, "gradual_no_loss_target_cutback", info.LastCwndChangeReason)
-	require.Equal(t, "short_bw_downshift_pipe_filled", info.LastBWChangeReason)
+	require.Equal(t, "gradual_no_congestion_target_cutback_capped", info.LastCwndChangeReason)
+	require.Equal(t, "short_bw_downshift_with_congestion_evidence", info.LastBWChangeReason)
 }
 
 func TestAdaptiveBDPDebugInfoPublicAPIReturnsFalseWhenUnavailable(t *testing.T) {
@@ -125,6 +181,52 @@ func TestAdaptiveBDPDebugInfoPublicAPIReturnsFalseWhenUnavailable(t *testing.T) 
 	info, ok = (&Conn{sentPacketHandler: adaptiveDebugSentPacketHandler{ok: false}}).AdaptiveBDPDebugInfo()
 	require.False(t, ok)
 	require.Zero(t, info)
+}
+
+func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
+	cfg := toCongestionCwndTuningConfig(CwndTuning{
+		Algorithm:                 CongestionControlAdaptiveBDP,
+		LossGraceRatio:            0.01,
+		LossSoftThreshold:         0.015,
+		LossSevereThreshold:       0.05,
+		EmergencyLossThreshold:    0.10,
+		LossMinBytes:              2560,
+		EmergencyLossMinBytes:     10240,
+		MinLossSampleBytes:        64 * 1024,
+		LossEWMAAlpha:             0.25,
+		MaxLossCwndCutNoQueue:     0.15,
+		MaxLossCwndCutWithQueue:   0.30,
+		MinLossCwndCut:            0.01,
+		MaxLossPacingCutNoQueue:   0.10,
+		MaxLossPacingCutWithQueue: 0.25,
+		LossCutbackCooldown:       200 * time.Millisecond,
+		MildLossPersistentRounds:  2,
+		UploadWarmupDuration:      time.Second,
+		UploadWarmupBytes:         512 * 1024,
+		MinDownshiftSampleBytes:   128 * 1024,
+		CongestionDownshiftRounds: 3,
+	})
+
+	require.Equal(t, congestion.CongestionControlAdaptiveBDP, cfg.Algorithm)
+	require.Equal(t, 0.01, cfg.LossGraceRatio)
+	require.Equal(t, 0.015, cfg.LossSoftThreshold)
+	require.Equal(t, 0.05, cfg.LossSevereThreshold)
+	require.Equal(t, 0.10, cfg.EmergencyLossThreshold)
+	require.Equal(t, uint64(2560), cfg.LossMinBytes)
+	require.Equal(t, uint64(10240), cfg.EmergencyLossMinBytes)
+	require.Equal(t, uint64(64*1024), cfg.MinLossSampleBytes)
+	require.Equal(t, 0.25, cfg.LossEWMAAlpha)
+	require.Equal(t, 0.15, cfg.MaxLossCwndCutNoQueue)
+	require.Equal(t, 0.30, cfg.MaxLossCwndCutWithQueue)
+	require.Equal(t, 0.01, cfg.MinLossCwndCut)
+	require.Equal(t, 0.10, cfg.MaxLossPacingCutNoQueue)
+	require.Equal(t, 0.25, cfg.MaxLossPacingCutWithQueue)
+	require.Equal(t, 200*time.Millisecond, cfg.LossCutbackCooldown)
+	require.Equal(t, uint32(2), cfg.MildLossPersistentRounds)
+	require.Equal(t, time.Second, cfg.UploadWarmupDuration)
+	require.Equal(t, uint64(512*1024), cfg.UploadWarmupBytes)
+	require.Equal(t, uint64(128*1024), cfg.MinDownshiftSampleBytes)
+	require.Equal(t, uint32(3), cfg.CongestionDownshiftRounds)
 }
 
 type testConnectionOpt func(*Conn)

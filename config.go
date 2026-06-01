@@ -81,11 +81,74 @@ func validateConfig(config *Config) error {
 	if config.CwndTuning.LossTarget < 0 {
 		config.CwndTuning.LossTarget = 0
 	}
+	if config.CwndTuning.LossGraceRatio < 0 {
+		config.CwndTuning.LossGraceRatio = 0
+	}
+	if config.CwndTuning.LossSoftThreshold < 0 {
+		config.CwndTuning.LossSoftThreshold = 0
+	}
+	if config.CwndTuning.LossSevereThreshold < 0 {
+		config.CwndTuning.LossSevereThreshold = 0
+	}
 	if config.CwndTuning.EmergencyLossThreshold < 0 {
 		config.CwndTuning.EmergencyLossThreshold = 0
 	}
+	if config.CwndTuning.LossEWMAAlpha < 0 {
+		config.CwndTuning.LossEWMAAlpha = 0
+	}
+	if config.CwndTuning.LossEWMAAlpha > 1 {
+		config.CwndTuning.LossEWMAAlpha = 1
+	}
+	if config.CwndTuning.MaxLossCwndCutNoQueue < 0 {
+		config.CwndTuning.MaxLossCwndCutNoQueue = 0
+	}
+	if config.CwndTuning.MaxLossCwndCutNoQueue > 1 {
+		config.CwndTuning.MaxLossCwndCutNoQueue = 1
+	}
+	if config.CwndTuning.MaxLossCwndCutWithQueue < 0 {
+		config.CwndTuning.MaxLossCwndCutWithQueue = 0
+	}
+	if config.CwndTuning.MaxLossCwndCutWithQueue > 1 {
+		config.CwndTuning.MaxLossCwndCutWithQueue = 1
+	}
+	if config.CwndTuning.MinLossCwndCut < 0 {
+		config.CwndTuning.MinLossCwndCut = 0
+	}
+	if config.CwndTuning.MinLossCwndCut > 1 {
+		config.CwndTuning.MinLossCwndCut = 1
+	}
+	if config.CwndTuning.MaxLossPacingCutNoQueue < 0 {
+		config.CwndTuning.MaxLossPacingCutNoQueue = 0
+	}
+	if config.CwndTuning.MaxLossPacingCutNoQueue > 1 {
+		config.CwndTuning.MaxLossPacingCutNoQueue = 1
+	}
+	if config.CwndTuning.MaxLossPacingCutWithQueue < 0 {
+		config.CwndTuning.MaxLossPacingCutWithQueue = 0
+	}
+	if config.CwndTuning.MaxLossPacingCutWithQueue > 1 {
+		config.CwndTuning.MaxLossPacingCutWithQueue = 1
+	}
+	if config.CwndTuning.LossCutbackCooldown < 0 {
+		config.CwndTuning.LossCutbackCooldown = 0
+	}
 	if config.CwndTuning.DownshiftRatio < 0 {
 		config.CwndTuning.DownshiftRatio = 0
+	}
+	if config.CwndTuning.NoCongestionRateFloorFraction < 0 {
+		config.CwndTuning.NoCongestionRateFloorFraction = 0
+	}
+	if config.CwndTuning.NoCongestionRateFloorFraction > 1 {
+		config.CwndTuning.NoCongestionRateFloorFraction = 1
+	}
+	if config.CwndTuning.NoCongestionDownshiftFactor < 0 {
+		config.CwndTuning.NoCongestionDownshiftFactor = 0
+	}
+	if config.CwndTuning.NoCongestionDownshiftFactor > 1 {
+		config.CwndTuning.NoCongestionDownshiftFactor = 1
+	}
+	if config.CwndTuning.UploadWarmupDuration < 0 {
+		config.CwndTuning.UploadWarmupDuration = 0
 	}
 	if config.CwndTuning.PacingMargin < 0 {
 		config.CwndTuning.PacingMargin = 0
