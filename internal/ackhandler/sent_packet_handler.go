@@ -361,15 +361,15 @@ func (h *sentPacketHandler) SentPacket(
 	p.isPathProbePacket = isPathProbePacket
 	isAckEliciting := p.IsAckEliciting()
 	if isAckEliciting {
+		if h.bytesInFlight == 0 {
+			h.firstSentTime = t
+			h.deliveredTime = t
+		}
 		p.DeliveredBytes = h.deliveredBytes
 		p.DeliveredTime = h.deliveredTime
 		p.FirstSentTime = h.firstSentTime
 		p.IsAppLimited = h.isSampleAppLimited(t)
 		p.TxInFlight = h.bytesInFlight
-		if h.bytesInFlight == 0 {
-			h.firstSentTime = t
-			p.FirstSentTime = t
-		}
 	}
 
 	if isPathProbePacket {
@@ -534,11 +534,17 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	var bestSample congestion.RateSample
 	var bestSamplePacket protocol.PacketNumber
 	var sawRateSample bool
+	var newestAckedSendTime monotime.Time
+	var sawAckedInFlight bool
 	allSamplesAppLimited := true
 	for _, p := range ackedPackets {
 		if p.includedInBytesInFlight {
 			h.deliveredBytes += p.Length
 			h.deliveredTime = rcvTime
+			if !sawAckedInFlight || p.SendTime.After(newestAckedSendTime) {
+				newestAckedSendTime = p.SendTime
+				sawAckedInFlight = true
+			}
 			if hasRateSampleSupport {
 				sample := h.makeRateSample(p.packet, samplePriorInFlight, rcvTime)
 				totalAcked += p.Length
@@ -567,6 +573,9 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		if !p.isPathProbePacket {
 			putPacket(p.packet)
 		}
+	}
+	if sawAckedInFlight {
+		h.firstSentTime = newestAckedSendTime
 	}
 	if hasRateSampleSupport && totalAcked > 0 {
 		if !sawRateSample {
@@ -638,6 +647,9 @@ func (h *sentPacketHandler) makeRateSample(p *packet, priorInFlight protocol.Byt
 		sendElapsed = ackElapsed
 	}
 	interval := max(ackElapsed, sendElapsed)
+	sample.DeliveredDelta = delivered
+	sample.AckElapsed = ackElapsed
+	sample.SendElapsed = sendElapsed
 	if interval <= 0 || delivered <= 0 {
 		return sample
 	}
@@ -649,7 +661,20 @@ func (h *sentPacketHandler) makeRateSample(p *packet, priorInFlight protocol.Byt
 	sample.DeliveryRate = protocol.ByteCount(rate)
 	sample.AckedBytes = delivered
 	sample.IsValid = sample.DeliveryRate > 0
+	if isSuspiciousRateSample(sample) {
+		sample.IsValid = false
+	}
 	return sample
+}
+
+func isSuspiciousRateSample(sample congestion.RateSample) bool {
+	if !sample.IsValid {
+		return true
+	}
+	if sample.Interval <= 0 || sample.DeliveredDelta <= 0 {
+		return true
+	}
+	return false
 }
 
 func (h *sentPacketHandler) isBetterRateSample(candidate, best congestion.RateSample, hasBest bool) bool {

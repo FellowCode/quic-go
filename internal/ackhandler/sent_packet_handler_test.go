@@ -1778,6 +1778,132 @@ func TestRateSamplerProducesSample(t *testing.T) {
 	last := algo.samples[len(algo.samples)-1]
 	require.True(t, last.IsValid)
 	require.Greater(t, last.DeliveryRate, protocol.ByteCount(0))
+	require.Greater(t, last.DeliveredDelta, protocol.ByteCount(0))
+	require.Greater(t, last.Interval, time.Duration(0))
+	require.Greater(t, last.AckElapsed, time.Duration(0))
+	require.Greater(t, last.SendElapsed, time.Duration(0))
+}
+
+func TestRateSamplerExportsIntervalBreakdown(t *testing.T) {
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	algo := &captureRateSampleAlgorithm{}
+	sph.congestion = algo
+
+	now := monotime.Now()
+	pn1 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn1, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	pn2 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(10*time.Millisecond), pn2, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pn1, pn2)}, protocol.Encryption1RTT, now.Add(110*time.Millisecond))
+	require.NoError(t, err)
+	require.Len(t, algo.samples, 1)
+	sample := algo.samples[0]
+	require.True(t, sample.IsValid)
+	require.Equal(t, protocol.ByteCount(2400), sample.DeliveredDelta)
+	require.Equal(t, 110*time.Millisecond, sample.AckElapsed)
+	require.Equal(t, 10*time.Millisecond, sample.SendElapsed)
+	require.Equal(t, sample.AckElapsed, sample.Interval)
+	require.Equal(t, protocol.ByteCount(2400), sample.AckedBytes)
+	require.Equal(t, protocol.ByteCount(2400), sample.DeliveredBytes)
+}
+
+func TestRateSamplerSetsDeliveredTimeWhenSendingFromIdle(t *testing.T) {
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+
+	now := monotime.Now()
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+
+	gotPN, p := sph.appDataPackets.history.FirstOutstanding()
+	require.Equal(t, pn, gotPN)
+	require.NotNil(t, p)
+	require.Equal(t, now, p.DeliveredTime)
+	require.Equal(t, now, p.FirstSentTime)
+}
+
+func TestRateSamplerDoesNotUseStaleFirstSentTimeDuringContinuousUpload(t *testing.T) {
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	algo := &captureRateSampleAlgorithm{cwnd: 64 * 1200}
+	sph.congestion = algo
+
+	const (
+		packetSize = protocol.ByteCount(1200)
+		rtt        = 150 * time.Millisecond
+		iterations = 260
+	)
+	now := monotime.Now()
+	var outstanding []protocol.PacketNumber
+	sendTimes := make(map[protocol.PacketNumber]monotime.Time)
+	for range 32 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, packetSize, false, false)
+		outstanding = append(outstanding, pn)
+		sendTimes[pn] = now
+		now = now.Add(time.Millisecond)
+	}
+
+	var lastAckedSendTime monotime.Time
+	var lastSample congestion.RateSample
+	for range iterations {
+		acked := outstanding[0]
+		outstanding = outstanding[1:]
+		lastAckedSendTime = sendTimes[acked]
+		ackTime := sendTimes[acked].Add(rtt)
+		if ackTime.Before(now) {
+			ackTime = now
+		}
+		_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(acked)}, protocol.Encryption1RTT, ackTime)
+		require.NoError(t, err)
+		require.NotEmpty(t, algo.samples)
+		lastSample = algo.samples[len(algo.samples)-1]
+		require.LessOrEqual(t, lastSample.SendElapsed, 2*rtt)
+		require.Greater(t, lastSample.DeliveryRate, protocol.ByteCount(0))
+
+		sendTime := ackTime.Add(time.Millisecond)
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(sendTime, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, packetSize, false, false)
+		outstanding = append(outstanding, pn)
+		sendTimes[pn] = sendTime
+		now = sendTime
+	}
+
+	require.Greater(t, now.Sub(sendTimes[outstanding[0]]), time.Duration(0))
+	require.LessOrEqual(t, lastSample.SendElapsed, 2*rtt)
+	require.Equal(t, lastAckedSendTime, sph.firstSentTime)
 }
 
 func TestRateSamplerMarksAppLimited(t *testing.T) {
