@@ -1252,6 +1252,13 @@ func (h *sentPacketHandler) SetMaxDatagramSize(s protocol.ByteCount) {
 	h.congestion.SetMaxDatagramSize(s)
 }
 
+func (h *sentPacketHandler) AdaptiveBDPDebugInfo() (congestion.AdaptiveBDPDebugInfo, bool) {
+	if adaptive, ok := h.congestion.(congestion.SendAlgorithmWithAdaptiveBDPDebugInfo); ok {
+		return adaptive.AdaptiveBDPDebugInfo(), true
+	}
+	return congestion.AdaptiveBDPDebugInfo{}, false
+}
+
 func (h *sentPacketHandler) isAmplificationLimited() bool {
 	if h.peerAddressValidated {
 		return false
