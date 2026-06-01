@@ -19,6 +19,11 @@ const (
 	adaptiveBDPProbeRTT
 )
 
+const (
+	adaptiveBDPHealthyBandwidthRatio = 0.98
+	adaptiveBDPCruisePacingGain      = 1.05
+)
+
 type bandwidthSample struct {
 	round uint64
 	bw    uint64
@@ -111,6 +116,12 @@ type adaptiveBDPSender struct {
 
 	lostBytesThisRound  protocol.ByteCount
 	ackedBytesThisRound protocol.ByteCount
+
+	lastBandwidthSample      uint64
+	lastBandwidthSampleRound uint64
+	hasLastBandwidthSample   bool
+	lastBandwidthGrowthRound uint64
+	hasLastBandwidthGrowth   bool
 
 	lastLossCutbackRound      uint64
 	hasLastLossCutbackRound   bool
@@ -279,6 +290,9 @@ func (s *adaptiveBDPSender) OnCongestionEvent(_ protocol.PacketNumber, lostBytes
 	if !s.canLossCutbackThisRound() {
 		return
 	}
+	if s.bandwidthOutweighsLoss() {
+		return
+	}
 	lossRate := s.lossRate()
 	cutback := false
 	if lossRate > s.emergencyLossThreshold() && s.canEmergencyCutbackThisRound() {
@@ -431,6 +445,8 @@ func (s *adaptiveBDPSender) updateBandwidth(sample RateSample, priorInFlight pro
 	}
 
 	sampleBW := uint64(sample.DeliveryRate)
+	prevMaxBw := s.maxBw
+	s.updateBandwidthCompetition(sample, sampleBW, prevMaxBw)
 	if sample.AppLimited {
 		if sampleBW > s.maxBw {
 			s.maxBw = sampleBW
@@ -467,6 +483,19 @@ func (s *adaptiveBDPSender) updateBandwidth(sample RateSample, priorInFlight pro
 	}
 
 	s.bw = max(1, activeBW)
+}
+
+func (s *adaptiveBDPSender) updateBandwidthCompetition(sample RateSample, sampleBW, prevMaxBw uint64) {
+	if sample.AppLimited {
+		return
+	}
+	s.lastBandwidthSample = sampleBW
+	s.lastBandwidthSampleRound = s.roundCount
+	s.hasLastBandwidthSample = true
+	if prevMaxBw == 0 || sampleBW >= prevMaxBw {
+		s.lastBandwidthGrowthRound = s.roundCount
+		s.hasLastBandwidthGrowth = true
+	}
 }
 
 func (s *adaptiveBDPSender) bootstrapBandwidth() {
@@ -539,6 +568,20 @@ func (s *adaptiveBDPSender) canReduceWindow(priorInFlight protocol.ByteCount) bo
 	return s.queueDelay() > s.queueTarget() && priorInFlight < s.congestionWindow
 }
 
+func (s *adaptiveBDPSender) bandwidthOutweighsLoss() bool {
+	if !s.hasLastBandwidthSample || !s.isFreshBandwidthRound(s.lastBandwidthSampleRound) || s.maxBw == 0 {
+		return false
+	}
+	if s.hasLastBandwidthGrowth && s.isFreshBandwidthRound(s.lastBandwidthGrowthRound) {
+		return true
+	}
+	return float64(s.lastBandwidthSample) >= float64(s.maxBw)*adaptiveBDPHealthyBandwidthRatio
+}
+
+func (s *adaptiveBDPSender) isFreshBandwidthRound(round uint64) bool {
+	return round == s.roundCount || round+1 == s.roundCount
+}
+
 func (s *adaptiveBDPSender) canLossCutbackThisRound() bool {
 	return !s.hasLastLossCutbackRound || s.lastLossCutbackRound != s.roundCount
 }
@@ -566,7 +609,7 @@ func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample, priorInFligh
 	if s.queueHighRounds >= s.queuePersistentRounds() {
 		return true
 	}
-	if s.canReduceWindow(priorInFlight) && s.lossRate() > s.lossTarget() {
+	if s.canReduceWindow(priorInFlight) && s.lossRate() > s.lossTarget() && !s.bandwidthOutweighsLoss() {
 		return true
 	}
 	if s.canReduceWindow(priorInFlight) && sample.IsValid && !sample.AppLimited && s.bw > 0 && float64(sample.DeliveryRate) < float64(s.bw)*s.downshiftRatio() {
@@ -683,7 +726,7 @@ func (s *adaptiveBDPSender) probeDownGain() float64 {
 
 func (s *adaptiveBDPSender) cruisePacingGain() float64 {
 	if s.cfg.CruisePacingGain <= 0 {
-		return 1.0
+		return adaptiveBDPCruisePacingGain
 	}
 	return s.cfg.CruisePacingGain
 }
