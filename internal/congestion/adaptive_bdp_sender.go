@@ -169,10 +169,18 @@ type adaptiveBDPSender struct {
 	suppressProbeUpUntilRound uint64
 	suppressProbeUpReason     string
 
-	lostBytesThisRound  protocol.ByteCount
-	ackedBytesThisRound protocol.ByteCount
-	lossRatioEWMA       float64
-	mildLossRounds      uint32
+	lostBytesThisRound          protocol.ByteCount
+	ackedBytesThisRound         protocol.ByteCount
+	lossRatioEWMA               float64
+	mildLossRounds              uint32
+	lossFreeRounds              uint32
+	lastMaterialLossRound       uint64
+	hasMaterialLossRound        bool
+	lossRecoveryProbeBW         uint64
+	lossRecoveryProbeUntilRound uint64
+	lossRecoveryProbeActive     bool
+	lastLossRecoveryProbeRound  uint64
+	hasLastLossRecoveryProbe    bool
 
 	lastRateSample    RateSample
 	lastPriorInFlight protocol.ByteCount
@@ -334,6 +342,7 @@ func (s *adaptiveBDPSender) OnPacketAckedWithRateSample(
 	s.updateRound(sample, priorInFlight, eventTime)
 
 	s.updateBandwidthAt(sample, priorInFlight, eventTime)
+	s.maybeStartLossRecoveryProbe(eventTime, sample, priorInFlight)
 
 	enterProbeDown := s.shouldEnterProbeDown(sample, priorInFlight, eventTime)
 	if enterProbeDown {
@@ -500,24 +509,29 @@ func (s *adaptiveBDPSender) AdaptiveBDPDebugInfo() AdaptiveBDPDebugInfo {
 		NoQueueLowRounds:               s.noQueueLow.rounds,
 		NoQueueLowAcked:                s.noQueueLow.acked,
 
-		LossRatioRound:            s.roundLossRatio(),
-		LossRatioEWMA:             s.lossRatioEWMA,
-		LostBytesThisRound:        s.lostBytesThisRound,
-		AckedBytesThisRound:       s.ackedBytesThisRound,
-		LossMinBytes:              s.lossMinBytes(),
-		EmergencyLossMinBytes:     s.emergencyLossMinBytes(),
-		MinLossSampleBytes:        s.minLossSampleBytes(),
-		LossGraceRatio:            s.lossGraceRatio(),
-		LossSevereThreshold:       s.lossSevereThreshold(),
-		EmergencyLossThreshold:    s.emergencyLossThreshold(),
-		QueuePressure:             s.queuePressure(),
-		MildLossRounds:            s.mildLossRounds,
-		LastLossActionReason:      s.lastLossActionReason,
-		LastLossCwndMultiplier:    s.lastLossCwndMultiplier,
-		LastLossPacingMultiplier:  s.lastLossPacingMultiplier,
-		LastLossCutbackRound:      s.lastLossCutbackRound,
-		SuppressProbeUpUntilRound: s.suppressProbeUpUntilRound,
-		SuppressProbeUpReason:     s.suppressProbeUpReason,
+		LossRatioRound:              s.roundLossRatio(),
+		LossRatioEWMA:               s.lossRatioEWMA,
+		LostBytesThisRound:          s.lostBytesThisRound,
+		AckedBytesThisRound:         s.ackedBytesThisRound,
+		LossMinBytes:                s.lossMinBytes(),
+		EmergencyLossMinBytes:       s.emergencyLossMinBytes(),
+		MinLossSampleBytes:          s.minLossSampleBytes(),
+		LossGraceRatio:              s.lossGraceRatio(),
+		LossSevereThreshold:         s.lossSevereThreshold(),
+		EmergencyLossThreshold:      s.emergencyLossThreshold(),
+		QueuePressure:               s.queuePressure(),
+		MildLossRounds:              s.mildLossRounds,
+		LastLossActionReason:        s.lastLossActionReason,
+		LastLossCwndMultiplier:      s.lastLossCwndMultiplier,
+		LastLossPacingMultiplier:    s.lastLossPacingMultiplier,
+		LastLossCutbackRound:        s.lastLossCutbackRound,
+		SuppressProbeUpUntilRound:   s.suppressProbeUpUntilRound,
+		SuppressProbeUpReason:       s.suppressProbeUpReason,
+		LossFreeRounds:              s.lossFreeRounds,
+		LastMaterialLossRound:       s.lastMaterialLossRound,
+		LossRecoveryProbeActive:     s.lossRecoveryProbeActive,
+		LossRecoveryProbeBW:         s.lossRecoveryProbeBW,
+		LossRecoveryProbeUntilRound: s.lossRecoveryProbeUntilRound,
 
 		RoundCount:         s.roundCount,
 		RoundStart:         s.roundStart,
@@ -615,6 +629,11 @@ func (s *adaptiveBDPSender) updateRound(sample RateSample, priorInFlight protoco
 		s.fullBwReached = true
 	}
 	s.updateLossEWMA()
+	if s.roundHasMaterialLoss() {
+		s.noteMaterialLossRound()
+	} else {
+		s.noteLossFreeRound()
+	}
 	if sample.DeliveredBytes > 0 {
 		s.nextRoundDelivered = sample.DeliveredBytes + max(1, sample.AckedBytes)
 	} else {
@@ -712,6 +731,15 @@ func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight p
 	}
 	if s.shortBw > 0 {
 		activeBW = min(activeBW, s.shortBw)
+	}
+	if s.lossRecoveryProbeActive {
+		if s.roundCount > s.lossRecoveryProbeUntilRound || s.hasFreshMaterialLoss() || s.queueState() == adaptiveQueuePersistent {
+			s.lossRecoveryProbeActive = false
+			s.lossRecoveryProbeBW = 0
+		} else if s.lossRecoveryProbeBW > activeBW {
+			activeBW = s.lossRecoveryProbeBW
+			s.lastBWChangeReason = "loss_recovery_probe_bw_floor"
+		}
 	}
 	s.bw = max(1, activeBW)
 	if s.bw != prevBw && s.lastBWChangeReason == "" {
@@ -902,6 +930,96 @@ func (s *adaptiveBDPSender) activeBandwidthBeforeDownshift() uint64 {
 	return active
 }
 
+func (s *adaptiveBDPSender) lossRecoveryGoalBandwidth() uint64 {
+	goal := s.maxBw
+	if s.cfg.StartupTargetRateBps > 0 {
+		goal = max(goal, s.cfg.StartupTargetRateBps/8)
+	}
+	if floor := s.noCongestionRateFloorBytesPerSecond(); floor > 0 {
+		goal = max(goal, floor)
+	}
+	if s.cfg.MaxProbeRateBps > 0 {
+		goal = min(goal, s.cfg.MaxProbeRateBps/8)
+	}
+	return goal
+}
+
+func (s *adaptiveBDPSender) currentRecoveryBaseBandwidth() uint64 {
+	cur := s.bw
+	if cur == 0 {
+		cur = s.minimumObservableBandwidth()
+	}
+	if s.shortBw > 0 {
+		cur = min(cur, s.shortBw)
+	}
+	if cur == 0 && s.lastRateSample.DeliveryRate > 0 {
+		cur = uint64(s.lastRateSample.DeliveryRate)
+	}
+	return max(cur, 1)
+}
+
+func (s *adaptiveBDPSender) clearProbeSuppressAfterLossRecovery() {
+	if s.lossFreeRounds >= s.lossRecoveryProbeRounds() && s.queueState() == adaptiveQueueEmpty && !s.hasRecentECNCE() {
+		if s.suppressProbeUpUntilRound > s.roundCount {
+			s.suppressProbeUpUntilRound = 0
+			s.suppressProbeUpReason = "cleared_after_loss_free_rounds"
+		}
+	}
+}
+
+func (s *adaptiveBDPSender) maybeStartLossRecoveryProbe(eventTime monotime.Time, sample RateSample, _ protocol.ByteCount) {
+	if s.lossFreeRounds < s.lossRecoveryProbeRounds() {
+		return
+	}
+	if s.queueState() != adaptiveQueueEmpty {
+		return
+	}
+	if s.hasRecentECNCE() || s.hasFreshMaterialLoss() {
+		return
+	}
+	if sample.AppLimited {
+		return
+	}
+
+	goal := s.lossRecoveryGoalBandwidth()
+	if goal == 0 {
+		return
+	}
+
+	cur := s.currentRecoveryBaseBandwidth()
+	if cur >= goal {
+		return
+	}
+
+	next := uint64(float64(cur) * s.lossRecoveryProbeGain())
+	if floor := s.noCongestionRateFloorBytesPerSecond(); floor > 0 {
+		next = max(next, min(goal, floor))
+	}
+	next = min(goal, max(next, cur+uint64(s.maxDatagramSize)))
+
+	s.clearProbeSuppressAfterLossRecovery()
+
+	s.lossRecoveryProbeBW = next
+	s.lossRecoveryProbeUntilRound = s.roundCount + s.lossRecoveryProbeDurationRounds()
+	s.lossRecoveryProbeActive = true
+	s.lastLossRecoveryProbeRound = s.roundCount
+	s.hasLastLossRecoveryProbe = true
+
+	if s.shortBw > 0 && s.shortBw < next {
+		s.shortBw = next
+		s.lastBWChangeReason = "short_bw_lifted_after_loss_free_rounds"
+	}
+	if s.maxBw > 0 && s.shortBw > 0 && float64(s.shortBw) >= float64(s.maxBw)*s.lossRecoveryClearShortBwFraction() {
+		s.shortBw = 0
+		s.lastBWChangeReason = "short_bw_cleared_after_loss_recovery"
+	}
+
+	s.probeUpActive = true
+	s.probeUpRoundStart = s.roundCount
+	s.lastProbeTime = eventTime
+	s.enterStateWithReason(adaptiveBDPProbeBW, eventTime, "loss_free_recovery_probe")
+}
+
 func (s *adaptiveBDPSender) pipeForDownshift() protocol.ByteCount {
 	bw := s.maxBw
 	if bw == 0 {
@@ -976,6 +1094,13 @@ func (s *adaptiveBDPSender) hasRecentECNCE() bool {
 		return false
 	}
 	return s.lastECNCERound == s.roundCount || s.lastECNCERound+1 == s.roundCount
+}
+
+func (s *adaptiveBDPSender) hasFreshMaterialLoss() bool {
+	if !s.hasMaterialLossRound {
+		return false
+	}
+	return s.lastMaterialLossRound == s.roundCount || s.lastMaterialLossRound+1 == s.roundCount
 }
 
 func (s *adaptiveBDPSender) negativeBandwidthConfidence() float64 {
@@ -1400,6 +1525,31 @@ func (s *adaptiveBDPSender) canReactToLoss() bool {
 	return true
 }
 
+func (s *adaptiveBDPSender) roundHasMaterialLoss() bool {
+	if s.lostBytesThisRound < s.lossMinBytes() {
+		return false
+	}
+	if s.ackedBytesThisRound+s.lostBytesThisRound < s.minLossSampleBytes() {
+		return false
+	}
+	return s.lossRateThisRound() > s.lossGraceRatio()
+}
+
+func (s *adaptiveBDPSender) noteMaterialLossRound() {
+	s.lossFreeRounds = 0
+	s.lastMaterialLossRound = s.roundCount
+	s.hasMaterialLossRound = true
+	s.lossRecoveryProbeActive = false
+	s.lossRecoveryProbeBW = 0
+}
+
+func (s *adaptiveBDPSender) noteLossFreeRound() {
+	if s.ackedBytesThisRound < s.minLossSampleBytes() {
+		return
+	}
+	s.lossFreeRounds++
+}
+
 func (s *adaptiveBDPSender) updateMildLossRounds(lossRatio float64) {
 	if lossRatio > s.lossGraceRatio() {
 		s.mildLossRounds++
@@ -1415,6 +1565,34 @@ func (s *adaptiveBDPSender) mildLossPersistentRoundsTarget() uint32 {
 	return 2
 }
 
+func (s *adaptiveBDPSender) lossRecoveryProbeRounds() uint32 {
+	if s.cfg.LossRecoveryProbeRounds == 0 {
+		return 2
+	}
+	return s.cfg.LossRecoveryProbeRounds
+}
+
+func (s *adaptiveBDPSender) lossRecoveryProbeGain() float64 {
+	if s.cfg.LossRecoveryProbeGain <= 0 {
+		return 1.25
+	}
+	return clampFloat(s.cfg.LossRecoveryProbeGain, 1.01, 2.0)
+}
+
+func (s *adaptiveBDPSender) lossRecoveryProbeDurationRounds() uint64 {
+	if s.cfg.LossRecoveryProbeDurationRounds == 0 {
+		return 1
+	}
+	return uint64(s.cfg.LossRecoveryProbeDurationRounds)
+}
+
+func (s *adaptiveBDPSender) lossRecoveryClearShortBwFraction() float64 {
+	if s.cfg.LossRecoveryClearShortBwFraction <= 0 {
+		return 0.95
+	}
+	return clampFloat(s.cfg.LossRecoveryClearShortBwFraction, 0.50, 1.0)
+}
+
 func (s *adaptiveBDPSender) suppressProbeUpForOneRound(reason string) {
 	s.suppressProbeUpUntilRound = max(s.suppressProbeUpUntilRound, s.roundCount+1)
 	s.suppressProbeUpReason = reason
@@ -1425,10 +1603,25 @@ func (s *adaptiveBDPSender) suppressProbeUpForOneRound(reason string) {
 }
 
 func (s *adaptiveBDPSender) canProbeUp() bool {
-	if s.suppressProbeUpUntilRound == 0 {
+	queueState := s.queueState()
+	if queueState == adaptiveQueuePersistent {
+		return false
+	}
+	if s.hasRecentECNCE() {
+		return false
+	}
+	if s.hasFreshMaterialLoss() {
+		return false
+	}
+	if s.suppressProbeUpUntilRound == 0 || s.roundCount > s.suppressProbeUpUntilRound {
 		return true
 	}
-	return s.roundCount > s.suppressProbeUpUntilRound
+	if s.lossFreeRounds >= s.lossRecoveryProbeRounds() && queueState == adaptiveQueueEmpty {
+		s.suppressProbeUpUntilRound = 0
+		s.suppressProbeUpReason = "cleared_after_loss_free_rounds"
+		return true
+	}
+	return false
 }
 
 func (s *adaptiveBDPSender) isFreshBandwidthRound(round uint64) bool {
