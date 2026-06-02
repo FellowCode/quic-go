@@ -49,6 +49,11 @@ func TestAdaptiveBDPDebugInfo(t *testing.T) {
 		CwndTuningConfig{Enable: true},
 	)
 	s.minRTT = 150 * time.Millisecond
+	s.lossFreeRounds = 3
+	s.lastMaterialLossRound = 7
+	s.lossRecoveryProbeActive = true
+	s.lossRecoveryProbeBW = 1_750_000
+	s.lossRecoveryProbeUntilRound = 9
 	s.OnPacketAckedWithRateSample(
 		1,
 		1280,
@@ -99,6 +104,11 @@ func TestAdaptiveBDPDebugInfo(t *testing.T) {
 	require.Equal(t, s.lastLossCutbackRound, info.LastLossCutbackRound)
 	require.Equal(t, s.suppressProbeUpUntilRound, info.SuppressProbeUpUntilRound)
 	require.Equal(t, s.suppressProbeUpReason, info.SuppressProbeUpReason)
+	require.Equal(t, s.lossFreeRounds, info.LossFreeRounds)
+	require.Equal(t, s.lastMaterialLossRound, info.LastMaterialLossRound)
+	require.Equal(t, s.lossRecoveryProbeActive, info.LossRecoveryProbeActive)
+	require.Equal(t, s.lossRecoveryProbeBW, info.LossRecoveryProbeBW)
+	require.Equal(t, s.lossRecoveryProbeUntilRound, info.LossRecoveryProbeUntilRound)
 }
 
 func TestAdaptiveBDPQueueState(t *testing.T) {
@@ -373,6 +383,10 @@ func TestAdaptiveBDPLossReactionDefaults(t *testing.T) {
 	require.Equal(t, 0.01, s.minLossCwndCut())
 	require.Equal(t, 0.10, s.maxLossPacingCutNoQueue())
 	require.Equal(t, 0.25, s.maxLossPacingCutWithQueue())
+	require.Equal(t, uint32(2), s.lossRecoveryProbeRounds())
+	require.Equal(t, 1.25, s.lossRecoveryProbeGain())
+	require.Equal(t, uint64(1), s.lossRecoveryProbeDurationRounds())
+	require.Equal(t, 0.95, s.lossRecoveryClearShortBwFraction())
 }
 
 func TestAdaptiveBDPLossReactionDefaultOverrides(t *testing.T) {
@@ -384,17 +398,21 @@ func TestAdaptiveBDPLossReactionDefaultOverrides(t *testing.T) {
 		&utils.ConnectionStats{},
 		1280,
 		CwndTuningConfig{
-			Enable:                    true,
-			LossGraceRatio:            0.02,
-			LossSoftThreshold:         0.03,
-			LossSevereThreshold:       0.04,
-			EmergencyLossThreshold:    0.03,
-			LossEWMAAlpha:             2,
-			MaxLossCwndCutNoQueue:     0.60,
-			MaxLossCwndCutWithQueue:   0.40,
-			MinLossCwndCut:            0.20,
-			MaxLossPacingCutNoQueue:   0.60,
-			MaxLossPacingCutWithQueue: 0.40,
+			Enable:                           true,
+			LossGraceRatio:                   0.02,
+			LossSoftThreshold:                0.03,
+			LossSevereThreshold:              0.04,
+			EmergencyLossThreshold:           0.03,
+			LossEWMAAlpha:                    2,
+			MaxLossCwndCutNoQueue:            0.60,
+			MaxLossCwndCutWithQueue:          0.40,
+			MinLossCwndCut:                   0.20,
+			MaxLossPacingCutNoQueue:          0.60,
+			MaxLossPacingCutWithQueue:        0.40,
+			LossRecoveryProbeRounds:          4,
+			LossRecoveryProbeGain:            3.0,
+			LossRecoveryProbeDurationRounds:  3,
+			LossRecoveryClearShortBwFraction: 0.40,
 		},
 	)
 
@@ -408,6 +426,10 @@ func TestAdaptiveBDPLossReactionDefaultOverrides(t *testing.T) {
 	require.Equal(t, 0.10, s.minLossCwndCut())
 	require.Equal(t, 0.50, s.maxLossPacingCutNoQueue())
 	require.Equal(t, 0.40, s.maxLossPacingCutWithQueue())
+	require.Equal(t, uint32(4), s.lossRecoveryProbeRounds())
+	require.Equal(t, 2.0, s.lossRecoveryProbeGain())
+	require.Equal(t, uint64(3), s.lossRecoveryProbeDurationRounds())
+	require.Equal(t, 0.50, s.lossRecoveryClearShortBwFraction())
 }
 
 func TestAdaptiveBDPLossPressure(t *testing.T) {
@@ -543,6 +565,57 @@ func TestAdaptiveBDPLossEligibility(t *testing.T) {
 
 	s.ackedBytesThisRound = 100_000
 	require.True(t, s.canReactToLoss())
+}
+
+func TestAdaptiveBDPMaterialLossRoundAccountingHelpers(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:             true,
+			LossGraceRatio:     0.01,
+			MinLossSampleBytes: 64 * 1024,
+		},
+	)
+
+	s.ackedBytesThisRound = 100_000
+	s.lostBytesThisRound = 214
+	require.False(t, s.roundHasMaterialLoss())
+
+	s.lostBytesThisRound = 3 * 1280
+	s.ackedBytesThisRound = 10_000
+	require.False(t, s.roundHasMaterialLoss())
+
+	s.lostBytesThisRound = 1_000
+	s.ackedBytesThisRound = 99_000
+	require.False(t, s.roundHasMaterialLoss())
+
+	s.lostBytesThisRound = 3_000
+	s.ackedBytesThisRound = 97_000
+	require.True(t, s.roundHasMaterialLoss())
+
+	s.lossFreeRounds = 3
+	s.lossRecoveryProbeActive = true
+	s.lossRecoveryProbeBW = 1_750_000
+	s.roundCount = 12
+	s.noteMaterialLossRound()
+	require.Zero(t, s.lossFreeRounds)
+	require.Equal(t, uint64(12), s.lastMaterialLossRound)
+	require.True(t, s.hasMaterialLossRound)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Zero(t, s.lossRecoveryProbeBW)
+
+	s.ackedBytesThisRound = 10_000
+	s.noteLossFreeRound()
+	require.Zero(t, s.lossFreeRounds)
+
+	s.ackedBytesThisRound = 100_000
+	s.noteLossFreeRound()
+	require.Equal(t, uint32(1), s.lossFreeRounds)
 }
 
 func TestAdaptiveBDPMildLossWaitsForPersistenceWithoutQueue(t *testing.T) {
@@ -2124,6 +2197,55 @@ func TestAdaptiveBDPRoundTimerDoesNotUseStateTimer(t *testing.T) {
 	require.Equal(t, uint64(1), s.roundCount)
 }
 
+func TestAdaptiveBDPRoundAccountingTracksMaterialAndLossFreeRounds(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:             true,
+			LossGraceRatio:     0.01,
+			MinLossSampleBytes: 64 * 1024,
+		},
+	)
+	base := monotime.Now()
+	s.minRTT = 100 * time.Millisecond
+	s.lastRoundStartTime = base
+	s.lossFreeRounds = 2
+	s.lossRecoveryProbeActive = true
+	s.lossRecoveryProbeBW = 1_750_000
+
+	s.ackedBytesThisRound = 97_000
+	s.lostBytesThisRound = 3_000
+	s.updateRound(RateSample{AckedBytes: 1280}, 64*1280, base.Add(150*time.Millisecond))
+	require.True(t, s.roundStart)
+	require.Equal(t, uint64(1), s.roundCount)
+	require.Zero(t, s.lossFreeRounds)
+	require.True(t, s.hasMaterialLossRound)
+	require.Equal(t, uint64(1), s.lastMaterialLossRound)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Zero(t, s.lossRecoveryProbeBW)
+	require.Zero(t, s.ackedBytesThisRound)
+	require.Zero(t, s.lostBytesThisRound)
+
+	s.ackedBytesThisRound = 100_000
+	s.lostBytesThisRound = 0
+	s.updateRound(RateSample{AckedBytes: 1280}, 64*1280, base.Add(300*time.Millisecond))
+	require.Equal(t, uint64(2), s.roundCount)
+	require.Equal(t, uint32(1), s.lossFreeRounds)
+	require.Zero(t, s.ackedBytesThisRound)
+	require.Zero(t, s.lostBytesThisRound)
+
+	s.ackedBytesThisRound = 10_000
+	s.lostBytesThisRound = 0
+	s.updateRound(RateSample{AckedBytes: 1280}, 64*1280, base.Add(450*time.Millisecond))
+	require.Equal(t, uint64(3), s.roundCount)
+	require.Equal(t, uint32(1), s.lossFreeRounds)
+}
+
 func TestLossTriggersProbeDown(t *testing.T) {
 	var clock mockClock
 	rttStats := utils.NewRTTStats()
@@ -2511,6 +2633,7 @@ func TestAdaptiveBDPEmergencyLossProportional(t *testing.T) {
 
 	oldCwnd := s.congestionWindow
 	oldBw := s.bw
+	oldMaxBw := s.maxBw
 	s.OnCongestionEvent(1, 40_000, 64*1280)
 
 	require.Equal(t, adaptiveBDPProbeDown, s.state)
@@ -2519,6 +2642,7 @@ func TestAdaptiveBDPEmergencyLossProportional(t *testing.T) {
 	require.Equal(t, protocol.ByteCount(float64(oldCwnd)*0.50), s.congestionWindow)
 	require.Equal(t, uint64(float64(oldBw)*0.50), s.shortBw)
 	require.Equal(t, s.shortBw, s.bw)
+	require.Equal(t, oldMaxBw, s.maxBw)
 	require.Equal(t, "emergency_loss_proportional", s.lastLossActionReason)
 	require.Equal(t, "emergency_loss_proportional", s.lastStateChangeReason)
 	require.InDelta(t, 0.50, s.lastLossCwndMultiplier, 0.000001)
@@ -3351,6 +3475,562 @@ func TestAdaptiveBDPProbeUpSuppressionOverridesProbeGain(t *testing.T) {
 	s.roundCount = 12
 	require.True(t, s.canProbeUp())
 	require.Equal(t, s.probeUpGain(), s.pacingGain())
+}
+
+func TestAdaptiveBDPCanProbeUpClearsSuppressionAfterLossFreeRounds(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                  true,
+			QueueTarget:             20 * time.Millisecond,
+			LossRecoveryProbeRounds: 2,
+		},
+	)
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.suppressProbeUpUntilRound = 20
+	s.suppressProbeUpReason = "proportional_loss_no_queue"
+	require.False(t, s.canProbeUp())
+	require.Equal(t, "proportional_loss_no_queue", s.suppressProbeUpReason)
+
+	s.lossFreeRounds = 2
+	require.True(t, s.canProbeUp())
+	require.Zero(t, s.suppressProbeUpUntilRound)
+	require.Equal(t, "cleared_after_loss_free_rounds", s.suppressProbeUpReason)
+}
+
+func TestAdaptiveBDPCanProbeUpBlocksFreshCongestionSignals(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:      true,
+			QueueTarget: 20 * time.Millisecond,
+		},
+	)
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	require.True(t, s.canProbeUp())
+
+	s.lastECNCERound = 10
+	s.hasLastECNCE = true
+	require.False(t, s.canProbeUp())
+
+	s.lastECNCERound = 8
+	s.lastMaterialLossRound = 9
+	s.hasMaterialLossRound = true
+	require.False(t, s.canProbeUp())
+
+	s.lastMaterialLossRound = 8
+	persistentRTT := utils.NewRTTStats()
+	persistentRTT.UpdateRTT(140*time.Millisecond, 0)
+	s.rttStats = persistentRTT
+	s.queueHighRounds = s.queuePersistentRounds()
+	require.False(t, s.canProbeUp())
+}
+
+func TestAdaptiveBDPMaybeStartLossRecoveryProbeLiftsShortBandwidth(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                           true,
+			QueueTarget:                      20 * time.Millisecond,
+			LossRecoveryProbeRounds:          2,
+			LossRecoveryProbeGain:            1.25,
+			LossRecoveryProbeDurationRounds:  2,
+			LossRecoveryClearShortBwFraction: 0.95,
+			MaxProbeRateBps:                  30_000_000,
+		},
+	)
+	s.state = adaptiveBDPProbeDown
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.lossFreeRounds = 2
+	s.maxBw = mbitToBytesPerSecond(30)
+	s.bw = mbitToBytesPerSecond(4)
+	s.shortBw = mbitToBytesPerSecond(4)
+	s.suppressProbeUpUntilRound = 20
+	s.suppressProbeUpReason = "proportional_loss_no_queue"
+
+	s.maybeStartLossRecoveryProbe(
+		start,
+		RateSample{
+			DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(4)),
+			IsValid:      true,
+		},
+		64*1280,
+	)
+
+	require.True(t, s.lossRecoveryProbeActive)
+	require.Equal(t, mbitToBytesPerSecond(5), s.lossRecoveryProbeBW)
+	require.Equal(t, uint64(12), s.lossRecoveryProbeUntilRound)
+	require.Equal(t, uint64(10), s.lastLossRecoveryProbeRound)
+	require.True(t, s.hasLastLossRecoveryProbe)
+	require.Equal(t, s.lossRecoveryProbeBW, s.shortBw)
+	require.True(t, s.probeUpActive)
+	require.Equal(t, uint64(10), s.probeUpRoundStart)
+	require.Equal(t, start, s.lastProbeTime)
+	require.Equal(t, adaptiveBDPProbeBW, s.state)
+	require.Equal(t, "loss_free_recovery_probe", s.lastStateChangeReason)
+	require.Equal(t, "short_bw_lifted_after_loss_free_rounds", s.lastBWChangeReason)
+	require.Zero(t, s.suppressProbeUpUntilRound)
+	require.Equal(t, "cleared_after_loss_free_rounds", s.suppressProbeUpReason)
+}
+
+func TestAdaptiveBDPMaybeStartLossRecoveryProbeHonorsGoalAndGuards(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                           true,
+			QueueTarget:                      20 * time.Millisecond,
+			LossRecoveryProbeRounds:          2,
+			LossRecoveryProbeGain:            1.25,
+			LossRecoveryClearShortBwFraction: 0.95,
+			MaxProbeRateBps:                  20_000_000,
+			StartupTargetRateBps:             30_000_000,
+		},
+	)
+	s.state = adaptiveBDPProbeDown
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.lossFreeRounds = 2
+	s.maxBw = mbitToBytesPerSecond(20)
+	s.bw = mbitToBytesPerSecond(19)
+	s.shortBw = mbitToBytesPerSecond(19)
+
+	require.Equal(t, mbitToBytesPerSecond(20), s.lossRecoveryGoalBandwidth())
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.True(t, s.lossRecoveryProbeActive)
+	require.Equal(t, mbitToBytesPerSecond(20), s.lossRecoveryProbeBW)
+	require.Zero(t, s.shortBw)
+	require.Equal(t, "short_bw_cleared_after_loss_recovery", s.lastBWChangeReason)
+
+	s.lossRecoveryProbeActive = false
+	s.lossRecoveryProbeBW = 0
+	s.shortBw = mbitToBytesPerSecond(4)
+	s.lossFreeRounds = 1
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+
+	s.lossFreeRounds = 2
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true, AppLimited: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+
+	buildingRTT := utils.NewRTTStats()
+	buildingRTT.UpdateRTT(115*time.Millisecond, 0)
+	s.rttStats = buildingRTT
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+
+	s.rttStats = rttStats
+	s.lastECNCERound = s.roundCount
+	s.hasLastECNCE = true
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+
+	s.hasLastECNCE = false
+	s.lastMaterialLossRound = s.roundCount
+	s.hasMaterialLossRound = true
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+}
+
+func TestAdaptiveBDPLossRecoveryProbeBandwidthFloor(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:      true,
+			QueueTarget: 20 * time.Millisecond,
+		},
+	)
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.maxBw = mbitToBytesPerSecond(30)
+	s.bw = mbitToBytesPerSecond(4)
+	s.shortBw = mbitToBytesPerSecond(4)
+	s.lossRecoveryProbeActive = true
+	s.lossRecoveryProbeBW = mbitToBytesPerSecond(8)
+	s.lossRecoveryProbeUntilRound = 11
+
+	s.updateBandwidthAt(
+		RateSample{
+			DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(4)),
+			AckedBytes:   1280,
+			Interval:     100 * time.Millisecond,
+			RTT:          100 * time.Millisecond,
+			IsValid:      true,
+		},
+		64*1280,
+		start,
+	)
+
+	require.True(t, s.lossRecoveryProbeActive)
+	require.Equal(t, mbitToBytesPerSecond(8), s.bw)
+	require.Equal(t, "loss_recovery_probe_bw_floor", s.lastBWChangeReason)
+}
+
+func TestAdaptiveBDPLossRecoveryProbeBandwidthFloorStopsOnExpiryAndCongestion(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	newSender := func() *adaptiveBDPSender {
+		s := NewAdaptiveBDPSender(
+			&clock,
+			rttStats,
+			&utils.ConnectionStats{},
+			1280,
+			CwndTuningConfig{
+				Enable:      true,
+				QueueTarget: 20 * time.Millisecond,
+			},
+		)
+		s.minRTT = 100 * time.Millisecond
+		s.roundCount = 10
+		s.maxBw = mbitToBytesPerSecond(30)
+		s.bw = mbitToBytesPerSecond(4)
+		s.shortBw = mbitToBytesPerSecond(4)
+		s.lossRecoveryProbeActive = true
+		s.lossRecoveryProbeBW = mbitToBytesPerSecond(8)
+		s.lossRecoveryProbeUntilRound = 9
+		return s
+	}
+	s := newSender()
+	s.updateBandwidthAt(RateSample{
+		DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(4)),
+		Interval:     100 * time.Millisecond,
+		RTT:          100 * time.Millisecond,
+		IsValid:      true,
+	}, 64*1280, start)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Zero(t, s.lossRecoveryProbeBW)
+	require.Equal(t, mbitToBytesPerSecond(4), s.bw)
+
+	s = newSender()
+	s.lossRecoveryProbeUntilRound = 11
+	s.lastMaterialLossRound = 10
+	s.hasMaterialLossRound = true
+	s.updateBandwidthAt(RateSample{
+		DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(4)),
+		Interval:     100 * time.Millisecond,
+		RTT:          100 * time.Millisecond,
+		IsValid:      true,
+	}, 64*1280, start)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Zero(t, s.lossRecoveryProbeBW)
+	require.Equal(t, mbitToBytesPerSecond(4), s.bw)
+
+	s = newSender()
+	s.lossRecoveryProbeUntilRound = 11
+	persistentRTT := utils.NewRTTStats()
+	persistentRTT.UpdateRTT(140*time.Millisecond, 0)
+	s.rttStats = persistentRTT
+	s.queueHighRounds = s.queuePersistentRounds()
+	s.updateBandwidthAt(RateSample{
+		DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(4)),
+		Interval:     100 * time.Millisecond,
+		RTT:          140 * time.Millisecond,
+		IsValid:      true,
+	}, 64*1280, start)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Zero(t, s.lossRecoveryProbeBW)
+	require.Equal(t, mbitToBytesPerSecond(4), s.bw)
+}
+
+func TestAdaptiveBDPACKPathStartsLossRecoveryProbe(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                           true,
+			QueueTarget:                      20 * time.Millisecond,
+			LossRecoveryProbeRounds:          2,
+			LossRecoveryProbeGain:            1.25,
+			LossRecoveryProbeDurationRounds:  1,
+			LossRecoveryClearShortBwFraction: 0.95,
+			MaxProbeRateBps:                  30_000_000,
+		},
+	)
+	s.state = adaptiveBDPProbeDown
+	s.minRTT = 100 * time.Millisecond
+	s.lastRoundStartTime = start.Add(-200 * time.Millisecond)
+	s.lossFreeRounds = 2
+	s.maxBw = mbitToBytesPerSecond(30)
+	s.bw = mbitToBytesPerSecond(4)
+	s.shortBw = mbitToBytesPerSecond(4)
+	s.congestionWindow = 64 * 1280
+
+	s.OnPacketAckedWithRateSample(
+		1,
+		1280,
+		64*1280,
+		start,
+		RateSample{
+			DeliveryRate:   protocol.ByteCount(mbitToBytesPerSecond(4)),
+			AckedBytes:     1280,
+			DeliveredBytes: 1280,
+			PriorInFlight:  64 * 1280,
+			Interval:       100 * time.Millisecond,
+			RTT:            100 * time.Millisecond,
+			IsValid:        true,
+		},
+	)
+
+	require.True(t, s.lossRecoveryProbeActive)
+	require.Equal(t, mbitToBytesPerSecond(5), s.lossRecoveryProbeBW)
+	require.Equal(t, s.roundCount+s.lossRecoveryProbeDurationRounds(), s.lossRecoveryProbeUntilRound)
+	require.Equal(t, s.lossRecoveryProbeBW, s.shortBw)
+	require.True(t, s.probeUpActive)
+	require.Equal(t, adaptiveBDPProbeBW, s.state)
+	require.Equal(t, "loss_free_recovery_probe", s.lastStateChangeReason)
+}
+
+func TestLossCutbackRecoversAfterLossFreeRounds(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(150*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                           true,
+			StartupTargetRateBps:             30_000_000,
+			MaxProbeRateBps:                  30_000_000,
+			InitialWindowPackets:             256,
+			MinWindowPackets:                 32,
+			QueueTarget:                      20 * time.Millisecond,
+			LossRecoveryProbeRounds:          2,
+			LossRecoveryProbeGain:            1.25,
+			LossRecoveryProbeDurationRounds:  1,
+			LossRecoveryClearShortBwFraction: 0.95,
+		},
+	)
+	s.state = adaptiveBDPProbeDown
+	s.minRTT = 150 * time.Millisecond
+	s.lastRoundStartTime = start.Add(-300 * time.Millisecond)
+	s.maxBw = 30_000_000 / 8
+	s.shortBw = 300 * 1024
+	s.bw = s.shortBw
+	s.lossFreeRounds = 2
+	s.congestionWindow = 256 * 1280
+	s.updatePacingRate()
+	oldPacing := s.pacingRateBytesPerSecond
+
+	s.OnPacketAckedWithRateSample(
+		1,
+		1280,
+		256*1280,
+		start,
+		RateSample{
+			DeliveryRate:   protocol.ByteCount(300 * 1024),
+			AckedBytes:     1280,
+			DeliveredBytes: 1280,
+			PriorInFlight:  256 * 1280,
+			Interval:       150 * time.Millisecond,
+			RTT:            150 * time.Millisecond,
+			IsValid:        true,
+		},
+	)
+
+	require.True(t, s.lossRecoveryProbeActive)
+	require.Greater(t, s.lossRecoveryProbeBW, uint64(300*1024))
+	require.Greater(t, s.shortBw, uint64(300*1024))
+	require.Equal(t, adaptiveBDPProbeBW, s.state)
+	require.Equal(t, "loss_free_recovery_probe", s.lastStateChangeReason)
+
+	s.OnPacketAckedWithRateSample(
+		2,
+		1280,
+		256*1280,
+		start.Add(150*time.Millisecond),
+		RateSample{
+			DeliveryRate:   protocol.ByteCount(300 * 1024),
+			AckedBytes:     1280,
+			DeliveredBytes: 2560,
+			PriorInFlight:  256 * 1280,
+			Interval:       150 * time.Millisecond,
+			RTT:            150 * time.Millisecond,
+			IsValid:        true,
+		},
+	)
+	require.Greater(t, s.bw, uint64(300*1024))
+	require.Greater(t, s.pacingRateBytesPerSecond, oldPacing)
+}
+
+func TestLossRecoveryProbeDoesNotRunWithQueue(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(130*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                  true,
+			QueueTarget:             20 * time.Millisecond,
+			LossRecoveryProbeRounds: 2,
+		},
+	)
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.lossFreeRounds = 2
+	s.maxBw = mbitToBytesPerSecond(30)
+	s.bw = mbitToBytesPerSecond(4)
+	s.shortBw = mbitToBytesPerSecond(4)
+	oldShortBw := s.shortBw
+
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Equal(t, oldShortBw, s.shortBw)
+}
+
+func TestLossRecoveryProbeDoesNotRunWithFreshLoss(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                  true,
+			QueueTarget:             20 * time.Millisecond,
+			LossRecoveryProbeRounds: 2,
+		},
+	)
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.lossFreeRounds = 2
+	s.lastMaterialLossRound = 10
+	s.hasMaterialLossRound = true
+	s.maxBw = mbitToBytesPerSecond(30)
+	s.bw = mbitToBytesPerSecond(4)
+	s.shortBw = mbitToBytesPerSecond(4)
+
+	s.maybeStartLossRecoveryProbe(start, RateSample{IsValid: true}, 64*1280)
+	require.False(t, s.lossRecoveryProbeActive)
+	require.Equal(t, mbitToBytesPerSecond(4), s.shortBw)
+}
+
+func TestLossRecoveryClearsProbeSuppress(t *testing.T) {
+	var clock mockClock
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                  true,
+			QueueTarget:             20 * time.Millisecond,
+			LossRecoveryProbeRounds: 2,
+		},
+	)
+	s.minRTT = 100 * time.Millisecond
+	s.roundCount = 10
+	s.suppressProbeUpUntilRound = s.roundCount + 100
+	s.suppressProbeUpReason = "proportional_loss_no_queue"
+	s.lossFreeRounds = 2
+
+	require.True(t, s.canProbeUp())
+	require.Zero(t, s.suppressProbeUpUntilRound)
+	require.Equal(t, "cleared_after_loss_free_rounds", s.suppressProbeUpReason)
+}
+
+func TestLossRecoveryDoesNotRequireHighDeliverySample(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(150*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(
+		&clock,
+		rttStats,
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable:                           true,
+			QueueTarget:                      20 * time.Millisecond,
+			LossRecoveryProbeRounds:          2,
+			LossRecoveryProbeGain:            1.25,
+			LossRecoveryProbeDurationRounds:  1,
+			LossRecoveryClearShortBwFraction: 0.95,
+		},
+	)
+	s.minRTT = 150 * time.Millisecond
+	s.roundCount = 10
+	s.lossFreeRounds = 2
+	s.maxBw = 3_750_000
+	s.bw = 294 * 1024
+	s.shortBw = 294 * 1024
+
+	s.maybeStartLossRecoveryProbe(
+		start,
+		RateSample{
+			DeliveryRate: protocol.ByteCount(294 * 1024),
+			IsValid:      true,
+		},
+		64*1280,
+	)
+	require.True(t, s.lossRecoveryProbeActive)
+	require.Greater(t, s.lossRecoveryProbeBW, uint64(294*1024))
+
+	s.updateBandwidthAt(
+		RateSample{
+			DeliveryRate: protocol.ByteCount(294 * 1024),
+			Interval:     150 * time.Millisecond,
+			RTT:          150 * time.Millisecond,
+			IsValid:      true,
+		},
+		64*1280,
+		start,
+	)
+	require.Greater(t, s.bw, uint64(294*1024))
 }
 
 func TestAdaptiveBDPProbeUpSuppressionBlocksNewProbe(t *testing.T) {

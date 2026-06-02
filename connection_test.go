@@ -90,24 +90,29 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 				NoQueueLowRounds:               4,
 				NoQueueLowAcked:                8192,
 
-				LossRatioRound:            0.02,
-				LossRatioEWMA:             0.015,
-				LostBytesThisRound:        2560,
-				AckedBytesThisRound:       125_440,
-				LossMinBytes:              2560,
-				EmergencyLossMinBytes:     10_240,
-				MinLossSampleBytes:        65_536,
-				LossGraceRatio:            0.01,
-				LossSevereThreshold:       0.05,
-				EmergencyLossThreshold:    0.10,
-				QueuePressure:             0.5,
-				MildLossRounds:            2,
-				LastLossActionReason:      "proportional_loss_cutback",
-				LastLossCwndMultiplier:    0.98,
-				LastLossPacingMultiplier:  0.99,
-				LastLossCutbackRound:      41,
-				SuppressProbeUpUntilRound: 43,
-				SuppressProbeUpReason:     "proportional_loss_no_queue",
+				LossRatioRound:              0.02,
+				LossRatioEWMA:               0.015,
+				LostBytesThisRound:          2560,
+				AckedBytesThisRound:         125_440,
+				LossMinBytes:                2560,
+				EmergencyLossMinBytes:       10_240,
+				MinLossSampleBytes:          65_536,
+				LossGraceRatio:              0.01,
+				LossSevereThreshold:         0.05,
+				EmergencyLossThreshold:      0.10,
+				QueuePressure:               0.5,
+				MildLossRounds:              2,
+				LastLossActionReason:        "proportional_loss_cutback",
+				LastLossCwndMultiplier:      0.98,
+				LastLossPacingMultiplier:    0.99,
+				LastLossCutbackRound:        41,
+				SuppressProbeUpUntilRound:   43,
+				SuppressProbeUpReason:       "proportional_loss_no_queue",
+				LossFreeRounds:              3,
+				LastMaterialLossRound:       39,
+				LossRecoveryProbeActive:     true,
+				LossRecoveryProbeBW:         1_750_000,
+				LossRecoveryProbeUntilRound: 44,
 
 				RoundCount:         42,
 				RoundStart:         true,
@@ -165,6 +170,11 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 	require.Equal(t, uint64(41), info.LastLossCutbackRound)
 	require.Equal(t, uint64(43), info.SuppressProbeUpUntilRound)
 	require.Equal(t, "proportional_loss_no_queue", info.SuppressProbeUpReason)
+	require.Equal(t, uint32(3), info.LossFreeRounds)
+	require.Equal(t, uint64(39), info.LastMaterialLossRound)
+	require.True(t, info.LossRecoveryProbeActive)
+	require.Equal(t, uint64(1_750_000), info.LossRecoveryProbeBW)
+	require.Equal(t, uint64(44), info.LossRecoveryProbeUntilRound)
 	require.Equal(t, uint64(42), info.RoundCount)
 	require.Equal(t, lastRoundStart.ToTime(), info.LastRoundStartTime)
 	require.Equal(t, uint64(1280), info.PacerBudget)
@@ -185,26 +195,30 @@ func TestAdaptiveBDPDebugInfoPublicAPIReturnsFalseWhenUnavailable(t *testing.T) 
 
 func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
 	cfg := toCongestionCwndTuningConfig(CwndTuning{
-		Algorithm:                 CongestionControlAdaptiveBDP,
-		LossGraceRatio:            0.01,
-		LossSoftThreshold:         0.015,
-		LossSevereThreshold:       0.05,
-		EmergencyLossThreshold:    0.10,
-		LossMinBytes:              2560,
-		EmergencyLossMinBytes:     10240,
-		MinLossSampleBytes:        64 * 1024,
-		LossEWMAAlpha:             0.25,
-		MaxLossCwndCutNoQueue:     0.15,
-		MaxLossCwndCutWithQueue:   0.30,
-		MinLossCwndCut:            0.01,
-		MaxLossPacingCutNoQueue:   0.10,
-		MaxLossPacingCutWithQueue: 0.25,
-		LossCutbackCooldown:       200 * time.Millisecond,
-		MildLossPersistentRounds:  2,
-		UploadWarmupDuration:      time.Second,
-		UploadWarmupBytes:         512 * 1024,
-		MinDownshiftSampleBytes:   128 * 1024,
-		CongestionDownshiftRounds: 3,
+		Algorithm:                        CongestionControlAdaptiveBDP,
+		LossGraceRatio:                   0.01,
+		LossSoftThreshold:                0.015,
+		LossSevereThreshold:              0.05,
+		EmergencyLossThreshold:           0.10,
+		LossMinBytes:                     2560,
+		EmergencyLossMinBytes:            10240,
+		MinLossSampleBytes:               64 * 1024,
+		LossEWMAAlpha:                    0.25,
+		MaxLossCwndCutNoQueue:            0.15,
+		MaxLossCwndCutWithQueue:          0.30,
+		MinLossCwndCut:                   0.01,
+		MaxLossPacingCutNoQueue:          0.10,
+		MaxLossPacingCutWithQueue:        0.25,
+		LossCutbackCooldown:              200 * time.Millisecond,
+		MildLossPersistentRounds:         2,
+		LossRecoveryProbeRounds:          3,
+		LossRecoveryProbeGain:            1.35,
+		LossRecoveryProbeDurationRounds:  4,
+		LossRecoveryClearShortBwFraction: 0.90,
+		UploadWarmupDuration:             time.Second,
+		UploadWarmupBytes:                512 * 1024,
+		MinDownshiftSampleBytes:          128 * 1024,
+		CongestionDownshiftRounds:        3,
 	})
 
 	require.Equal(t, congestion.CongestionControlAdaptiveBDP, cfg.Algorithm)
@@ -223,6 +237,10 @@ func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
 	require.Equal(t, 0.25, cfg.MaxLossPacingCutWithQueue)
 	require.Equal(t, 200*time.Millisecond, cfg.LossCutbackCooldown)
 	require.Equal(t, uint32(2), cfg.MildLossPersistentRounds)
+	require.Equal(t, uint32(3), cfg.LossRecoveryProbeRounds)
+	require.Equal(t, 1.35, cfg.LossRecoveryProbeGain)
+	require.Equal(t, uint32(4), cfg.LossRecoveryProbeDurationRounds)
+	require.Equal(t, 0.90, cfg.LossRecoveryClearShortBwFraction)
 	require.Equal(t, time.Second, cfg.UploadWarmupDuration)
 	require.Equal(t, uint64(512*1024), cfg.UploadWarmupBytes)
 	require.Equal(t, uint64(128*1024), cfg.MinDownshiftSampleBytes)

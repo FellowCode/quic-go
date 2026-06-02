@@ -61,22 +61,26 @@ type CwndTuning struct {
 	QueueTarget           time.Duration
 	QueuePersistentRounds uint32
 
-	LossTarget                float64
-	LossGraceRatio            float64
-	LossSoftThreshold         float64
-	LossSevereThreshold       float64
-	EmergencyLossThreshold    float64
-	LossMinBytes              uint64
-	EmergencyLossMinBytes     uint64
-	MinLossSampleBytes        uint64
-	LossEWMAAlpha             float64
-	MaxLossCwndCutNoQueue     float64
-	MaxLossCwndCutWithQueue   float64
-	MinLossCwndCut            float64
-	MaxLossPacingCutNoQueue   float64
-	MaxLossPacingCutWithQueue float64
-	LossCutbackCooldown       time.Duration
-	MildLossPersistentRounds  uint32
+	LossTarget                       float64
+	LossGraceRatio                   float64
+	LossSoftThreshold                float64
+	LossSevereThreshold              float64
+	EmergencyLossThreshold           float64
+	LossMinBytes                     uint64
+	EmergencyLossMinBytes            uint64
+	MinLossSampleBytes               uint64
+	LossEWMAAlpha                    float64
+	MaxLossCwndCutNoQueue            float64
+	MaxLossCwndCutWithQueue          float64
+	MinLossCwndCut                   float64
+	MaxLossPacingCutNoQueue          float64
+	MaxLossPacingCutWithQueue        float64
+	LossCutbackCooldown              time.Duration
+	MildLossPersistentRounds         uint32
+	LossRecoveryProbeRounds          uint32
+	LossRecoveryProbeGain            float64
+	LossRecoveryProbeDurationRounds  uint32
+	LossRecoveryClearShortBwFraction float64
 
 	BandwidthFilterRounds uint32
 	DownshiftRounds       uint32
@@ -141,24 +145,29 @@ type AdaptiveBDPDebugInfo struct {
 	NoQueueLowRounds               uint32
 	NoQueueLowAcked                uint64
 
-	LossRatioRound            float64
-	LossRatioEWMA             float64
-	LostBytesThisRound        uint64
-	AckedBytesThisRound       uint64
-	LossMinBytes              uint64
-	EmergencyLossMinBytes     uint64
-	MinLossSampleBytes        uint64
-	LossGraceRatio            float64
-	LossSevereThreshold       float64
-	EmergencyLossThreshold    float64
-	QueuePressure             float64
-	MildLossRounds            uint32
-	LastLossActionReason      string
-	LastLossCwndMultiplier    float64
-	LastLossPacingMultiplier  float64
-	LastLossCutbackRound      uint64
-	SuppressProbeUpUntilRound uint64
-	SuppressProbeUpReason     string
+	LossRatioRound              float64
+	LossRatioEWMA               float64
+	LostBytesThisRound          uint64
+	AckedBytesThisRound         uint64
+	LossMinBytes                uint64
+	EmergencyLossMinBytes       uint64
+	MinLossSampleBytes          uint64
+	LossGraceRatio              float64
+	LossSevereThreshold         float64
+	EmergencyLossThreshold      float64
+	QueuePressure               float64
+	MildLossRounds              uint32
+	LastLossActionReason        string
+	LastLossCwndMultiplier      float64
+	LastLossPacingMultiplier    float64
+	LastLossCutbackRound        uint64
+	SuppressProbeUpUntilRound   uint64
+	SuppressProbeUpReason       string
+	LossFreeRounds              uint32
+	LastMaterialLossRound       uint64
+	LossRecoveryProbeActive     bool
+	LossRecoveryProbeBW         uint64
+	LossRecoveryProbeUntilRound uint64
 
 	RoundCount         uint64
 	RoundStart         bool
