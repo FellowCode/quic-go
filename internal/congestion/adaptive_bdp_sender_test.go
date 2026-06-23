@@ -2721,7 +2721,7 @@ func TestAdaptiveBDPTwoPercentLossNoQueueSmallCutback(t *testing.T) {
 func TestAdaptiveBDPOnePercentLossWithQueueModerateCutback(t *testing.T) {
 	s := newAdaptiveBDPLossRegressionSender(140*time.Millisecond, 100*time.Millisecond, CwndTuningConfig{
 		Enable:                 true,
-		LossGraceRatio:         0.01,
+		LossGraceRatio:         0.005,
 		QueueTarget:            20 * time.Millisecond,
 		EmergencyLossThreshold: 1.0,
 		MinLossSampleBytes:     64 * 1024,
@@ -4075,4 +4075,65 @@ func TestAdaptiveBDPProbeUpSuppressionBlocksNewProbe(t *testing.T) {
 	require.False(t, s.probeUpActive)
 	require.Equal(t, s.cruisePacingGain(), s.pacingGain())
 	require.Equal(t, "mild_loss_waiting_persistence", s.suppressProbeUpReason)
+}
+
+func TestAdaptiveBDPLossToleranceBelowGraceRatioWithQueue(t *testing.T) {
+	s := newAdaptiveBDPLossRegressionSender(140*time.Millisecond, 100*time.Millisecond, CwndTuningConfig{
+		Enable:                 true,
+		LossGraceRatio:         0.02,
+		QueueTarget:            20 * time.Millisecond,
+		EmergencyLossThreshold: 1.0,
+		MinLossSampleBytes:     64 * 1024,
+	})
+	oldCwnd := s.congestionWindow
+	oldShortBw := s.shortBw
+	// 1.5% loss (below grace ratio of 2%)
+	s.ackedBytesThisRound = 985 * 1280
+	s.OnCongestionEvent(1, 15*1280, 64*1280)
+
+	require.Equal(t, oldCwnd, s.congestionWindow)
+	require.Equal(t, oldShortBw, s.shortBw)
+	require.Equal(t, adaptiveBDPProbeBW, s.state)
+	require.Equal(t, "mild_loss_below_grace_no_cwnd_cut", s.lastLossActionReason)
+}
+
+func TestAdaptiveBDPLossBelowSoftThresholdDoesNotCut(t *testing.T) {
+	s := newAdaptiveBDPLossRegressionSender(140*time.Millisecond, 100*time.Millisecond, CwndTuningConfig{
+		Enable:                 true,
+		LossGraceRatio:         0.01,
+		LossSoftThreshold:      0.05,
+		QueueTarget:            20 * time.Millisecond,
+		EmergencyLossThreshold: 1.0,
+		MinLossSampleBytes:     64 * 1024,
+	})
+	s.shortBw = s.bw
+	oldCwnd := s.congestionWindow
+	oldShortBw := s.shortBw
+	// 3% loss (above grace ratio of 1% but below soft threshold of 5%)
+	s.ackedBytesThisRound = 970 * 1280
+	s.OnCongestionEvent(1, 30*1280, 64*1280)
+
+	require.Equal(t, oldCwnd, s.congestionWindow)
+	require.Equal(t, oldShortBw, s.shortBw)
+	require.Equal(t, adaptiveBDPProbeDown, s.state)
+}
+
+func TestAdaptiveBDPMinLossSampleBytesIsAdaptive(t *testing.T) {
+	var clock mockClock
+	s := NewAdaptiveBDPSender(
+		&clock,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{
+			Enable: true,
+		},
+	)
+	s.congestionWindow = 1000 * 1280
+	s.minRTT = 100 * time.Millisecond
+	s.bw = mbitToBytesPerSecond(100)
+	s.maxBw = s.bw
+
+	expectedMinBytes := max(protocol.ByteCount(64*1024), max(s.bdp()/8, s.congestionWindow/4))
+	require.Equal(t, expectedMinBytes, s.minLossSampleBytes())
 }
