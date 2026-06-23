@@ -1680,7 +1680,7 @@ func (s *adaptiveBDPSender) handleLossReaction(eventTime monotime.Time, priorInF
 	}
 
 	hasQueue := s.queuePressure() > 0 || s.hasRecentECNCE()
-	if !hasQueue && lossRatio <= s.lossGraceRatio() {
+	if lossRatio <= s.lossGraceRatio() {
 		s.suppressProbeUpForOneRound("mild_loss_below_grace_no_cwnd_cut")
 		return
 	}
@@ -1841,12 +1841,12 @@ func (s *adaptiveBDPSender) squaredLossPressure(lossRatio float64) float64 {
 }
 
 func (s *adaptiveBDPSender) lossCwndMultiplier(lossRatio float64) float64 {
-	q := s.queuePressure()
-	hasQueue := q > 0 || s.hasRecentECNCE()
-	if !hasQueue && lossRatio <= s.lossGraceRatio() {
+	if lossRatio <= s.lossSoftThreshold() {
 		return 1.0
 	}
 
+	q := s.queuePressure()
+	hasQueue := q > 0 || s.hasRecentECNCE()
 	pressure := s.squaredLossPressure(lossRatio)
 	minCut := s.minLossCwndCut()
 	maxCut := s.maxLossCwndCutNoQueue()
@@ -1861,12 +1861,12 @@ func (s *adaptiveBDPSender) lossCwndMultiplier(lossRatio float64) float64 {
 }
 
 func (s *adaptiveBDPSender) lossPacingMultiplier(lossRatio float64) float64 {
-	q := s.queuePressure()
-	hasQueue := q > 0 || s.hasRecentECNCE()
-	if !hasQueue && lossRatio <= s.lossGraceRatio() {
+	if lossRatio <= s.lossSoftThreshold() {
 		return 1.0
 	}
 
+	q := s.queuePressure()
+	hasQueue := q > 0 || s.hasRecentECNCE()
 	pressure := s.squaredLossPressure(lossRatio)
 	maxCut := s.maxLossPacingCutNoQueue()
 	if hasQueue {
@@ -1885,10 +1885,12 @@ func (s *adaptiveBDPSender) minLossSampleBytes() protocol.ByteCount {
 		return protocol.ByteCount(s.cfg.MinLossSampleBytes)
 	}
 	bdp := s.bdp()
-	if bdp > 0 {
-		return max(64*1024, bdp/8)
+	cwnd := s.congestionWindow
+	base := max(64*1024, bdp/8)
+	if cwnd > 0 {
+		return max(base, cwnd/4)
 	}
-	return 64 * 1024
+	return base
 }
 
 func (s *adaptiveBDPSender) hasEnoughLossSample() bool {
