@@ -61,6 +61,9 @@ func (s adaptiveQueueState) String() string {
 const (
 	adaptiveBDPHealthyBandwidthRatio = 0.98
 	adaptiveBDPCruisePacingGain      = 1.05
+	adaptiveBDPProbeRTTMinDuration   = 200 * time.Millisecond
+	adaptiveBDPProbeRTTMaxDuration   = 2 * time.Second
+	adaptiveBDPProbeRTTRetryBackoff  = 2 * time.Second
 )
 
 type noQueueLowSampleState struct {
@@ -96,11 +99,21 @@ func (f *bandwidthMaxFilter) Update(round uint64, bw uint64) {
 	}
 	n := f.samples[:0]
 	for _, s := range f.samples {
-		if s.round >= keepFrom {
+		if s.round < keepFrom {
+			continue
+		}
+		if len(n) > 0 && n[len(n)-1].round == s.round {
+			n[len(n)-1].bw = max(n[len(n)-1].bw, s.bw)
+		} else {
 			n = append(n, s)
 		}
 	}
-	f.samples = append(n, bandwidthSample{round: round, bw: bw})
+	if len(n) > 0 && n[len(n)-1].round == round {
+		n[len(n)-1].bw = max(n[len(n)-1].bw, bw)
+	} else {
+		n = append(n, bandwidthSample{round: round, bw: bw})
+	}
+	f.samples = n
 }
 
 func (f *bandwidthMaxFilter) Max(round uint64) uint64 {
@@ -135,11 +148,25 @@ type adaptiveBDPSender struct {
 	initialWindow       protocol.ByteCount
 
 	pacingRateBytesPerSecond uint64
+	pacingCutMultiplier      float64
+	pacingCutUntil           monotime.Time
 
 	state adaptiveBDPState
 
-	minRTT          time.Duration
-	minRTTTimestamp monotime.Time
+	minRTT                        time.Duration
+	minRTTTimestamp               monotime.Time
+	probeRTTStart                 monotime.Time
+	probeRTTRound                 uint64
+	probeRTTHasFreshSample        bool
+	probeRTTMinRawRTT             time.Duration
+	probeRTTMinCappedRawRTT       time.Duration
+	probeRTTMinCappedRawRTTTime   monotime.Time
+	probeRTTObservationCount      uint32
+	probeRTTFirstObservationRound uint64
+	probeRTTLastObservationRound  uint64
+	probeRTTHasObservationRound   bool
+	probeRTTInFlightObservedAtCap bool
+	probeRTTRetryNotBefore        monotime.Time
 
 	bw      uint64
 	maxBw   uint64
@@ -159,9 +186,21 @@ type adaptiveBDPSender struct {
 	downshiftRounds uint32
 	noQueueLow      noQueueLowSampleState
 
+	lastQueueHighRound    uint64
+	hasLastQueueHighRound bool
+	lastDownshiftRound    uint64
+	hasLastDownshiftRound bool
+	lastECNReductionRound uint64
+	hasLastECNReduction   bool
+
 	lastRetransmittableSentTime monotime.Time
 	uploadWarmupStartTime       monotime.Time
 	uploadWarmupAcked           protocol.ByteCount
+	idleRestartActive           bool
+	idleRestartBaseBW           uint64
+	idleRestartAwaitingResult   bool
+	lastIdleRestartProbeRound   uint64
+	hasIdleRestartProbeRound    bool
 
 	lastProbeTime             monotime.Time
 	probeUpRoundStart         uint64
@@ -203,16 +242,17 @@ type adaptiveBDPSender struct {
 	lastBandwidthGrowthRound uint64
 	hasLastBandwidthGrowth   bool
 
-	lastLossCutbackRound      uint64
-	hasLastLossCutbackRound   bool
-	lastLossCutbackTime       monotime.Time
-	lastLossActionReason      string
-	lastLossCwndMultiplier    float64
-	lastLossPacingMultiplier  float64
-	lastEmergencyCutbackRound uint64
-	hasLastEmergencyCutback   bool
-	lastECNCERound            uint64
-	hasLastECNCE              bool
+	lastLossCutbackRound          uint64
+	hasLastLossCutbackRound       bool
+	lastLossCutbackTime           monotime.Time
+	lastLossActionReason          string
+	lastLossCwndMultiplier        float64
+	lastLossPacingMultiplier      float64
+	lastEmergencyCutbackRound     uint64
+	hasLastEmergencyCutback       bool
+	emergencyLossCutbackThisRound bool
+	lastECNCERound                uint64
+	hasLastECNCE                  bool
 
 	cfg CwndTuningConfig
 
@@ -237,7 +277,7 @@ func NewAdaptiveBDPSender(
 ) *adaptiveBDPSender {
 	maxPackets := protocol.ByteCount(protocol.MaxCongestionWindowPackets)
 	if cfg.MaxWindowPackets > 0 {
-		maxPackets = max(maxPackets, protocol.ByteCount(cfg.MaxWindowPackets))
+		maxPackets = protocol.ByteCount(cfg.MaxWindowPackets)
 	}
 	initialPackets := protocol.ByteCount(initialCongestionWindow)
 	if cfg.InitialWindowPackets > 0 {
@@ -290,7 +330,11 @@ func (s *adaptiveBDPSender) OnPacketSent(
 	if !isRetransmittable {
 		return
 	}
-	s.maybeStartUploadWarmup(sentTime, bytesInFlight)
+	idleRestart := s.isIdleBoundary(sentTime, bytesInFlight, bytes) && !s.lastRetransmittableSentTime.IsZero()
+	s.maybeStartUploadWarmup(sentTime, bytesInFlight, bytes)
+	if idleRestart {
+		s.startIdleRestart(sentTime)
+	}
 	s.lastRetransmittableSentTime = sentTime
 }
 
@@ -318,10 +362,17 @@ func (s *adaptiveBDPSender) OnPacketAcked(
 	priorInFlight protocol.ByteCount,
 	eventTime monotime.Time,
 ) {
+	rtt := s.rttStats.LatestRTT()
+	if rtt <= 0 {
+		rtt = s.rttStats.SmoothedRTT()
+	}
+	if rtt <= 0 {
+		rtt = s.rttStats.MinRTT()
+	}
 	s.OnPacketAckedWithRateSample(number, ackedBytes, priorInFlight, eventTime, RateSample{
 		AckedBytes:    ackedBytes,
 		PriorInFlight: priorInFlight,
-		RTT:           s.rttStats.SmoothedRTT(),
+		RTT:           rtt,
 	})
 }
 
@@ -338,10 +389,20 @@ func (s *adaptiveBDPSender) OnPacketAckedWithRateSample(
 	if !s.uploadWarmupStartTime.IsZero() {
 		s.uploadWarmupAcked += ackedBytes
 	}
-	s.updateMinRTT(sample.RTT, eventTime)
+	s.updateMinRTT(sample.RTT, priorInFlight, eventTime)
 	s.updateRound(sample, priorInFlight, eventTime)
 
 	s.updateBandwidthAt(sample, priorInFlight, eventTime)
+	if s.state == adaptiveBDPProbeRTT {
+		s.maybeExitProbeRTT(eventTime)
+		s.updatePacingRate()
+		if s.state != adaptiveBDPProbeRTT && !sample.AppLimited {
+			s.setCwndFromTarget(ackedBytes, priorInFlight)
+		}
+		s.updateDebugSnapshot(priorInFlight)
+		return
+	}
+	s.maybeRunIdleRestartProbe(sample, eventTime)
 	s.maybeStartLossRecoveryProbe(eventTime, sample, priorInFlight)
 
 	enterProbeDown := s.shouldEnterProbeDown(sample, priorInFlight, eventTime)
@@ -400,20 +461,34 @@ func (s *adaptiveBDPSender) OnCongestionEvent(_ protocol.PacketNumber, lostBytes
 	s.connStats.BytesLost.Add(uint64(lostBytes))
 	s.lostBytesThisRound += lostBytes
 
-	s.handleLossReaction(s.clock.Now(), priorInFlight)
+	if s.roundHasMaterialLoss() {
+		s.stopIdleRestartProbe()
+	}
+	if !s.canReactToLoss() {
+		s.lastStateChangeReason = s.lastLossActionReason
+	} else if s.shouldEmergencyCutback(s.roundLossRatio()) && s.canEmergencyCutbackThisRound() {
+		s.applyEmergencyLossCutback(s.clock.Now(), s.roundLossRatio())
+	}
 	s.updateDebugSnapshot(priorInFlight)
 }
 
 func (s *adaptiveBDPSender) OnECNCongestionEvent(priorInFlight protocol.ByteCount, eventTime monotime.Time) {
 	s.lastPriorInFlight = priorInFlight
+	s.stopIdleRestartProbe()
 	s.lastECNCERound = s.roundCount
 	s.hasLastECNCE = true
 	s.enterStateWithReason(adaptiveBDPProbeDown, eventTime, "ecn_congestion")
+	if s.hasLastECNReduction && s.lastECNReductionRound == s.roundCount {
+		s.updateDebugSnapshot(priorInFlight)
+		return
+	}
 	if s.bw > 0 {
 		s.shortBw = max(1, uint64(float64(s.bw)*s.probeDownGain()))
 		s.bw = min(s.bw, s.shortBw)
 		s.lastBWChangeReason = "ecn_congestion"
 	}
+	s.lastECNReductionRound = s.roundCount
+	s.hasLastECNReduction = true
 	s.updatePacingRate()
 	s.reduceCwndTowardTarget(priorInFlight, true)
 	s.updateDebugSnapshot(priorInFlight)
@@ -435,14 +510,84 @@ func (s *adaptiveBDPSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 
 func (s *adaptiveBDPSender) OnPersistentCongestion(eventTime monotime.Time) {
 	oldCwnd := s.congestionWindow
+	s.resetCapacityModelAfterPersistentCongestion(eventTime)
 	s.congestionWindow = s.minCongestionWindow
-	s.shortBw = 0
-	s.bw = 0
 	s.noteCwndChange(oldCwnd, "persistent_congestion")
 	s.lastBWChangeReason = "persistent_congestion"
 	s.enterStateWithReason(adaptiveBDPStartup, eventTime, "persistent_congestion")
 	s.updatePacingRate()
 	s.updateDebugSnapshot(s.lastPriorInFlight)
+}
+
+// resetCapacityModelAfterPersistentCongestion removes state derived from the
+// failed capacity estimate while retaining the current path's RTT and limits.
+func (s *adaptiveBDPSender) resetCapacityModelAfterPersistentCongestion(eventTime monotime.Time) {
+	s.bw = 0
+	s.maxBw = 0
+	s.shortBw = 0
+	s.bwFilter.samples = s.bwFilter.samples[:0]
+
+	s.nextRoundDelivered = 0
+	s.roundStart = false
+	s.lastRoundStartTime = eventTime
+	s.fullBw = 0
+	s.fullBwCount = 0
+	s.fullBwReached = false
+
+	s.queueHighRounds = 0
+	s.downshiftRounds = 0
+	s.noQueueLow = noQueueLowSampleState{}
+	s.lastQueueHighRound = 0
+	s.hasLastQueueHighRound = false
+	s.lastDownshiftRound = 0
+	s.hasLastDownshiftRound = false
+	s.lastECNReductionRound = 0
+	s.hasLastECNReduction = false
+
+	s.probeUpActive = false
+	s.probeUpRoundStart = 0
+	s.lastProbeTime = eventTime
+	s.suppressProbeUpUntilRound = 0
+	s.suppressProbeUpReason = ""
+
+	s.lostBytesThisRound = 0
+	s.ackedBytesThisRound = 0
+	s.lossRatioEWMA = 0
+	s.mildLossRounds = 0
+	s.lossFreeRounds = 0
+	s.lastMaterialLossRound = 0
+	s.hasMaterialLossRound = false
+	s.lossRecoveryProbeBW = 0
+	s.lossRecoveryProbeUntilRound = 0
+	s.lossRecoveryProbeActive = false
+	s.lastLossRecoveryProbeRound = 0
+	s.hasLastLossRecoveryProbe = false
+	s.lastLossCutbackRound = 0
+	s.hasLastLossCutbackRound = false
+	s.lastLossCutbackTime = 0
+	s.lastLossActionReason = ""
+	s.lastLossCwndMultiplier = 0
+	s.lastLossPacingMultiplier = 0
+	s.lastEmergencyCutbackRound = 0
+	s.hasLastEmergencyCutback = false
+	s.emergencyLossCutbackThisRound = false
+	s.lastECNCERound = 0
+	s.hasLastECNCE = false
+
+	s.lastBandwidthSample = 0
+	s.lastBandwidthSampleRound = 0
+	s.hasLastBandwidthSample = false
+	s.lastBandwidthGrowthRound = 0
+	s.hasLastBandwidthGrowth = false
+	s.pacingCutMultiplier = 0
+	s.pacingCutUntil = 0
+	s.resetProbeRTTObservationState()
+	s.probeRTTRetryNotBefore = 0
+	s.idleRestartActive = false
+	s.idleRestartBaseBW = 0
+	s.idleRestartAwaitingResult = false
+	s.lastIdleRestartProbeRound = 0
+	s.hasIdleRestartProbeRound = false
 }
 
 func (s *adaptiveBDPSender) SetMaxDatagramSize(mss protocol.ByteCount) {
@@ -577,21 +722,157 @@ func (s *adaptiveBDPSender) enterStateWithReason(st adaptiveBDPState, now monoti
 	if st == adaptiveBDPProbeBW {
 		s.queueHighRounds = 0
 		s.downshiftRounds = 0
+		s.hasLastQueueHighRound = false
+		s.hasLastDownshiftRound = false
 	}
 }
 
-func (s *adaptiveBDPSender) updateMinRTT(rtt time.Duration, now monotime.Time) {
+func (s *adaptiveBDPSender) updateMinRTT(rtt time.Duration, priorInFlight protocol.ByteCount, now monotime.Time) {
+	hasRawRTTSample := rtt > 0
 	if rtt <= 0 {
 		rtt = s.rttStats.MinRTT()
 	}
 	if rtt <= 0 {
 		return
 	}
-	window := s.minRTTFilterWindow()
-	if s.minRTT == 0 || rtt < s.minRTT || (!s.minRTTTimestamp.IsZero() && now.Sub(s.minRTTTimestamp) > window) {
+	if s.minRTT == 0 || rtt < s.minRTT {
+		s.minRTT = rtt
+		s.minRTTTimestamp = now
+		if s.state == adaptiveBDPProbeRTT && hasRawRTTSample {
+			s.probeRTTHasFreshSample = true
+		}
+		return
+	}
+	if s.state == adaptiveBDPProbeRTT {
+		if hasRawRTTSample {
+			s.recordProbeRTTObservation(rtt, priorInFlight, now)
+		}
+		if hasRawRTTSample && s.isProbeRTTSampleDrained(rtt) {
+			s.minRTT = rtt
+			s.minRTTTimestamp = now
+			s.probeRTTHasFreshSample = true
+		}
+		return
+	}
+	if !s.minRTTTimestamp.IsZero() && now.Sub(s.minRTTTimestamp) >= s.minRTTFilterWindow() {
+		if s.queueState() != adaptiveQueueEmpty {
+			if !s.probeRTTRetryNotBefore.IsZero() && now.Before(s.probeRTTRetryNotBefore) {
+				return
+			}
+			s.enterProbeRTT(now)
+			return
+		}
 		s.minRTT = rtt
 		s.minRTTTimestamp = now
 	}
+}
+
+func (s *adaptiveBDPSender) enterProbeRTT(now monotime.Time) {
+	if s.state == adaptiveBDPProbeRTT {
+		return
+	}
+	oldCwnd := s.congestionWindow
+	s.congestionWindow = s.minCongestionWindow
+	s.noteCwndChange(oldCwnd, "probe_rtt_inflight_cap")
+	s.probeUpActive = false
+	s.resetProbeRTTObservationState()
+	s.probeRTTRetryNotBefore = 0
+	s.probeRTTStart = now
+	s.probeRTTRound = s.roundCount
+	s.enterStateWithReason(adaptiveBDPProbeRTT, now, "probe_rtt_min_rtt_expired")
+}
+
+func (s *adaptiveBDPSender) maybeExitProbeRTT(now monotime.Time) {
+	if s.state != adaptiveBDPProbeRTT {
+		return
+	}
+	probeDuration := now.Sub(s.probeRTTStart)
+	if probeDuration < adaptiveBDPProbeRTTMinDuration {
+		return
+	}
+	if s.probeRTTHasFreshSample && s.roundCount > s.probeRTTRound {
+		s.finishProbeRTT(now, "probe_rtt_complete")
+		return
+	}
+	if s.canRebaseProbeRTTMinRTT() {
+		s.minRTT = s.probeRTTMinCappedRawRTT
+		s.minRTTTimestamp = s.probeRTTMinCappedRawRTTTime
+		s.finishProbeRTT(now, "probe_rtt_base_rtt_increased")
+		return
+	}
+	if probeDuration < adaptiveBDPProbeRTTMaxDuration {
+		return
+	}
+	// Preserve the trusted min RTT when the capped interval was inconclusive.
+	// The explicit retry gate avoids re-entering ProbeRTT on every ACK after an
+	// undrainable interval, while keeping cwnd at the drain cap until ordinary
+	// ProbeBW ACK processing grows it again.
+	s.minRTTTimestamp = now
+	s.finishProbeRTT(now, "probe_rtt_timeout_insufficient_drain_evidence")
+	s.probeRTTRetryNotBefore = now.Add(adaptiveBDPProbeRTTRetryBackoff)
+}
+
+func (s *adaptiveBDPSender) finishProbeRTT(now monotime.Time, reason string) {
+	s.resetProbeRTTObservationState()
+	s.probeRTTRetryNotBefore = 0
+	s.enterStateWithReason(adaptiveBDPProbeBW, now, reason)
+}
+
+func (s *adaptiveBDPSender) resetProbeRTTObservationState() {
+	s.probeRTTStart = 0
+	s.probeRTTRound = 0
+	s.probeRTTHasFreshSample = false
+	s.probeRTTMinRawRTT = 0
+	s.probeRTTMinCappedRawRTT = 0
+	s.probeRTTMinCappedRawRTTTime = 0
+	s.probeRTTObservationCount = 0
+	s.probeRTTFirstObservationRound = 0
+	s.probeRTTLastObservationRound = 0
+	s.probeRTTHasObservationRound = false
+	s.probeRTTInFlightObservedAtCap = false
+}
+
+func (s *adaptiveBDPSender) recordProbeRTTObservation(rtt time.Duration, priorInFlight protocol.ByteCount, now monotime.Time) {
+	if rtt <= 0 {
+		return
+	}
+	if s.probeRTTMinRawRTT == 0 || rtt < s.probeRTTMinRawRTT {
+		s.probeRTTMinRawRTT = rtt
+	}
+	if priorInFlight > s.minCongestionWindow {
+		return
+	}
+	s.probeRTTInFlightObservedAtCap = true
+	s.probeRTTObservationCount++
+	if !s.probeRTTHasObservationRound {
+		s.probeRTTFirstObservationRound = s.roundCount
+		s.probeRTTHasObservationRound = true
+	}
+	s.probeRTTLastObservationRound = s.roundCount
+	if s.probeRTTMinCappedRawRTT == 0 || rtt < s.probeRTTMinCappedRawRTT {
+		s.probeRTTMinCappedRawRTT = rtt
+		s.probeRTTMinCappedRawRTTTime = now
+	}
+}
+
+func (s *adaptiveBDPSender) canRebaseProbeRTTMinRTT() bool {
+	if s.probeRTTMinCappedRawRTT == 0 || !s.probeRTTInFlightObservedAtCap ||
+		!s.probeRTTHasObservationRound || s.probeRTTFirstObservationRound == s.probeRTTLastObservationRound ||
+		s.roundCount <= s.probeRTTRound {
+		return false
+	}
+	if s.hasLastECNCE && s.lastECNCERound >= s.probeRTTRound {
+		return false
+	}
+	return !(s.hasMaterialLossRound && s.lastMaterialLossRound >= s.probeRTTRound)
+}
+
+func (s *adaptiveBDPSender) isProbeRTTSampleDrained(rtt time.Duration) bool {
+	if rtt <= 0 || s.minRTT <= 0 {
+		return false
+	}
+	target := s.queueTarget()
+	return target > 0 && rtt <= s.minRTT+target/2
 }
 
 func (s *adaptiveBDPSender) updateRound(sample RateSample, priorInFlight protocol.ByteCount, now monotime.Time) {
@@ -619,21 +900,18 @@ func (s *adaptiveBDPSender) updateRound(sample RateSample, priorInFlight protoco
 	}
 	s.roundCount++
 	s.lastRoundStartTime = now
-	if s.maxBw >= uint64(float64(max(1, s.fullBw))*1.25) {
-		s.fullBw = s.maxBw
-		s.fullBwCount = 0
-	} else {
-		s.fullBwCount++
+	if !sample.AppLimited && sample.IsValid && sample.DeliveryRate > 0 {
+		if s.maxBw >= uint64(float64(max(1, s.fullBw))*1.25) {
+			s.fullBw = s.maxBw
+			s.fullBwCount = 0
+		} else {
+			s.fullBwCount++
+		}
+		if s.fullBwCount >= 3 {
+			s.fullBwReached = true
+		}
 	}
-	if s.fullBwCount >= 3 {
-		s.fullBwReached = true
-	}
-	s.updateLossEWMA()
-	if s.roundHasMaterialLoss() {
-		s.noteMaterialLossRound()
-	} else {
-		s.noteLossFreeRound()
-	}
+	s.finalizeLossRound(now, priorInFlight)
 	if sample.DeliveredBytes > 0 {
 		s.nextRoundDelivered = sample.DeliveredBytes + max(1, sample.AckedBytes)
 	} else {
@@ -643,6 +921,34 @@ func (s *adaptiveBDPSender) updateRound(sample RateSample, priorInFlight protoco
 	s.lostBytesThisRound = 0
 }
 
+// finalizeLossRound updates loss-derived state exactly once for the completed
+// round. Loss callbacks only collect bytes, except for an eligible emergency
+// response, so a burst of losses cannot look like multiple bad rounds.
+func (s *adaptiveBDPSender) finalizeLossRound(eventTime monotime.Time, priorInFlight protocol.ByteCount) {
+	if !s.hasEnoughLossSample() {
+		return
+	}
+	defer func() { s.emergencyLossCutbackThisRound = false }()
+
+	roundLossRatio := s.roundLossRatio()
+	s.updateLossEWMA()
+	s.updateMildLossRounds(roundLossRatio)
+	if s.roundHasMaterialLoss() {
+		s.noteMaterialLossRound()
+	} else {
+		s.noteLossFreeRound()
+	}
+
+	if s.shouldEmergencyCutback(roundLossRatio) && s.canEmergencyCutbackThisRound() {
+		s.applyEmergencyLossCutback(eventTime, roundLossRatio)
+		return
+	}
+	if s.emergencyLossCutbackThisRound {
+		return
+	}
+	s.handleLossReaction(eventTime, priorInFlight)
+}
+
 func (s *adaptiveBDPSender) updateBandwidth(sample RateSample, priorInFlight protocol.ByteCount) {
 	s.updateBandwidthAt(sample, priorInFlight, s.clock.Now())
 }
@@ -650,6 +956,7 @@ func (s *adaptiveBDPSender) updateBandwidth(sample RateSample, priorInFlight pro
 func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight protocol.ByteCount, eventTime monotime.Time) {
 	s.lastRateSample = sample
 	s.lastPriorInFlight = priorInFlight
+	s.prepareRoundGatedSignals()
 	if !sample.IsValid || sample.DeliveryRate == 0 {
 		if s.bw == 0 {
 			s.bootstrapBandwidth()
@@ -663,20 +970,25 @@ func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight p
 	prevMaxBw := s.maxBw
 	prevShortBw := s.shortBw
 	prevBw := s.bw
+	if len(s.bwFilter.samples) == 0 && prevMaxBw > 0 {
+		s.bwFilter.Update(s.roundCount, prevMaxBw)
+	}
 	s.updateBandwidthCompetition(sample, sampleBW, prevMaxBw)
 	if sample.AppLimited {
 		if sampleBW > s.maxBw {
 			s.bwFilter.Update(s.roundCount, sampleBW)
-			s.maxBw = max(s.maxBw, s.bwFilter.Max(s.roundCount))
-			s.lastBWChangeReason = "app_limited_higher_sample"
+			s.maxBw = s.bwFilter.Max(s.roundCount)
+			if s.maxBw != prevMaxBw {
+				s.lastBWChangeReason = "app_limited_higher_sample"
+			}
 		}
 	} else {
-		if s.maxBw == 0 || sampleBW > s.maxBw {
-			s.bwFilter.Update(s.roundCount, sampleBW)
-			s.maxBw = max(sampleBW, s.bwFilter.Max(s.roundCount))
-			if s.maxBw != prevMaxBw {
-				s.lastBWChangeReason = "max_bw_increased_by_delivery_sample"
-			}
+		s.bwFilter.Update(s.roundCount, sampleBW)
+		s.maxBw = s.bwFilter.Max(s.roundCount)
+		if s.maxBw > prevMaxBw {
+			s.lastBWChangeReason = "max_bw_increased_by_delivery_sample"
+		} else if s.maxBw < prevMaxBw {
+			s.lastBWChangeReason = "max_bw_aged_out"
 		}
 	}
 
@@ -687,11 +999,9 @@ func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight p
 
 	if !sample.AppLimited && activeBW > 0 && float64(sampleBW) < float64(activeBW)*s.downshiftRatio() {
 		if s.inUploadWarmup(eventTime) {
-			s.downshiftRounds = 0
 			s.noQueueLow = noQueueLowSampleState{}
 			s.lastBWChangeReason = "upload_warmup_low_sample_not_capacity_proof"
 		} else if !s.canUseSampleForDownshift(sample, priorInFlight) {
-			s.downshiftRounds = 0
 			s.noQueueLow = noQueueLowSampleState{}
 			if s.queueState() == adaptiveQueueEmpty {
 				s.lastBWChangeReason = "queue_empty_low_sample_not_capacity_proof"
@@ -701,19 +1011,21 @@ func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight p
 				s.lastBWChangeReason = "low_sample_no_queue_rejected"
 			}
 		} else if s.hasCongestionEvidence() {
-			s.downshiftRounds++
 			s.noQueueLow = noQueueLowSampleState{}
-			if s.downshiftRounds < s.congestionDownshiftRoundsTarget() {
-				s.lastBWChangeReason = "congestion_downshift_waiting_rounds"
-			} else {
-				s.confirmedCongestionDownshift(sampleBW, eventTime)
+			if !s.hasLastDownshiftRound || s.lastDownshiftRound != s.roundCount {
+				s.downshiftRounds++
+				s.lastDownshiftRound = s.roundCount
+				s.hasLastDownshiftRound = true
+				if s.downshiftRounds < s.congestionDownshiftRoundsTarget() {
+					s.lastBWChangeReason = "congestion_downshift_waiting_rounds"
+				} else {
+					s.confirmedCongestionDownshift(sampleBW, eventTime)
+				}
 			}
 		} else {
-			s.downshiftRounds = 0
 			s.noQueueLowSampleCandidate(sampleBW, sample, priorInFlight, eventTime)
 		}
 	} else if !sample.AppLimited {
-		s.downshiftRounds = 0
 		s.noQueueLow = noQueueLowSampleState{}
 		if s.shortBw > 0 && sampleBW > s.shortBw {
 			s.shortBw = min(sampleBW, max(s.maxBw, sampleBW))
@@ -750,14 +1062,85 @@ func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight p
 	}
 }
 
-func (s *adaptiveBDPSender) maybeStartUploadWarmup(sentTime monotime.Time, bytesInFlight protocol.ByteCount) {
-	if bytesInFlight != 0 {
-		return
-	}
-	if s.lastRetransmittableSentTime.IsZero() || sentTime.Sub(s.lastRetransmittableSentTime) >= s.uploadWarmupDuration() {
+func (s *adaptiveBDPSender) maybeStartUploadWarmup(sentTime monotime.Time, bytesInFlight, currentPacketBytes protocol.ByteCount) {
+	if s.lastRetransmittableSentTime.IsZero() || s.isIdleBoundary(sentTime, bytesInFlight, currentPacketBytes) {
 		s.uploadWarmupStartTime = sentTime
 		s.uploadWarmupAcked = 0
 	}
+}
+
+func (s *adaptiveBDPSender) isIdleBoundary(sentTime monotime.Time, bytesInFlight, currentPacketBytes protocol.ByteCount) bool {
+	return bytesInFlight <= currentPacketBytes &&
+		!s.lastRetransmittableSentTime.IsZero() &&
+		sentTime.Sub(s.lastRetransmittableSentTime) >= s.uploadWarmupDuration()
+}
+
+func (s *adaptiveBDPSender) startIdleRestart(now monotime.Time) {
+	s.idleRestartActive = true
+	s.idleRestartBaseBW = s.safeIdleRestartBandwidth()
+	s.idleRestartAwaitingResult = false
+	s.lastIdleRestartProbeRound = 0
+	s.hasIdleRestartProbeRound = false
+	s.probeUpActive = false
+	s.probeUpRoundStart = s.roundCount
+	if s.state != adaptiveBDPProbeRTT {
+		s.enterStateWithReason(adaptiveBDPProbeBW, now, "idle_restart")
+	}
+}
+
+func (s *adaptiveBDPSender) safeIdleRestartBandwidth() uint64 {
+	safeBW := s.bw
+	if safeBW == 0 {
+		safeBW = s.maxBw
+	}
+	if s.shortBw > 0 {
+		if safeBW == 0 {
+			safeBW = s.shortBw
+		} else {
+			safeBW = min(safeBW, s.shortBw)
+		}
+	}
+	return safeBW
+}
+
+func (s *adaptiveBDPSender) stopIdleRestartProbe() {
+	s.idleRestartActive = false
+	s.idleRestartAwaitingResult = false
+	s.probeUpActive = false
+}
+
+func (s *adaptiveBDPSender) maybeRunIdleRestartProbe(sample RateSample, eventTime monotime.Time) {
+	if !s.idleRestartActive {
+		return
+	}
+	queueState := s.queueState()
+	if queueState == adaptiveQueueBuilding || queueState == adaptiveQueuePersistent || s.hasRecentECNCE() || s.hasFreshMaterialLoss() {
+		s.stopIdleRestartProbe()
+		return
+	}
+	if sample.AppLimited || !s.roundStart {
+		return
+	}
+	if s.hasIdleRestartProbeRound && s.lastIdleRestartProbeRound == s.roundCount {
+		return
+	}
+	if s.idleRestartAwaitingResult {
+		if sample.DeliveryRate == 0 || uint64(sample.DeliveryRate) <= s.idleRestartBaseBW {
+			s.stopIdleRestartProbe()
+			return
+		}
+		s.idleRestartBaseBW = uint64(sample.DeliveryRate)
+		s.idleRestartAwaitingResult = false
+	}
+	if !s.canProbeUp() {
+		return
+	}
+	s.probeUpActive = true
+	s.probeUpRoundStart = s.roundCount
+	s.lastProbeTime = eventTime
+	s.lastIdleRestartProbeRound = s.roundCount
+	s.hasIdleRestartProbeRound = true
+	s.idleRestartAwaitingResult = true
 }
 
 func (s *adaptiveBDPSender) uploadWarmupDuration() time.Duration {
@@ -968,6 +1351,9 @@ func (s *adaptiveBDPSender) clearProbeSuppressAfterLossRecovery() {
 }
 
 func (s *adaptiveBDPSender) maybeStartLossRecoveryProbe(eventTime monotime.Time, sample RateSample, _ protocol.ByteCount) {
+	if s.hasLastLossRecoveryProbe && s.lastLossRecoveryProbeRound == s.roundCount {
+		return
+	}
 	if s.lossFreeRounds < s.lossRecoveryProbeRounds() {
 		return
 	}
@@ -1212,6 +1598,9 @@ func (s *adaptiveBDPSender) maxLossPacingCutWithQueue() float64 {
 }
 
 func (s *adaptiveBDPSender) noCongestionRateFloorBytesPerSecond() uint64 {
+	if s.cfg.DisableNoCongestionRateFloor {
+		return 0
+	}
 	if s.hasCongestionEvidence() {
 		return 0
 	}
@@ -1229,6 +1618,9 @@ func (s *adaptiveBDPSender) noCongestionRateFloorBytesPerSecond() uint64 {
 }
 
 func (s *adaptiveBDPSender) noCongestionCwndFloor() protocol.ByteCount {
+	if s.cfg.DisableNoCongestionRateFloor {
+		return 0
+	}
 	rateFloor := uint64(0)
 	if s.cfg.MinProbeRateBps > 0 {
 		rateFloor = s.cfg.MinProbeRateBps / 8
@@ -1308,6 +1700,11 @@ func (s *adaptiveBDPSender) bootstrapBandwidth() {
 }
 
 func (s *adaptiveBDPSender) updatePacingRate() {
+	s.updatePacingRateAt(s.clock.Now())
+}
+
+func (s *adaptiveBDPSender) updatePacingRateAt(now monotime.Time) {
+	s.clearExpiredPacingCut(now)
 	if s.bw == 0 {
 		s.bootstrapBandwidth()
 	}
@@ -1319,22 +1716,36 @@ func (s *adaptiveBDPSender) updatePacingRate() {
 	if floor := s.noCongestionRateFloorBytesPerSecond(); floor > 0 {
 		rate = max(rate, float64(floor))
 	}
+	if s.pacingCutMultiplier > 0 {
+		rate *= s.pacingCutMultiplier
+	}
 	minRate := s.minimumPacingRate()
-	if s.inProtectedStartup(s.clock.Now()) {
+	if s.inProtectedStartup(now) {
 		minRate = max(minRate, s.startupProtectedPacingRate())
 	}
 	s.pacingRateBytesPerSecond = max(uint64(rate), minRate)
 }
 
-func (s *adaptiveBDPSender) applyTemporaryPacingMultiplier(multiplier float64, _ monotime.Time, _ time.Duration) {
-	if multiplier <= 0 {
+func (s *adaptiveBDPSender) clearExpiredPacingCut(now monotime.Time) {
+	if s.pacingCutMultiplier > 0 && !s.pacingCutUntil.IsZero() && now >= s.pacingCutUntil {
+		s.pacingCutMultiplier = 0
+		s.pacingCutUntil = 0
+	}
+}
+
+func (s *adaptiveBDPSender) applyTemporaryPacingMultiplier(multiplier float64, eventTime monotime.Time, duration time.Duration) {
+	if multiplier <= 0 || duration <= 0 {
 		return
 	}
-	if s.pacingRateBytesPerSecond == 0 {
-		s.updatePacingRate()
+	s.clearExpiredPacingCut(eventTime)
+	if s.pacingCutMultiplier == 0 || multiplier < s.pacingCutMultiplier {
+		s.pacingCutMultiplier = multiplier
 	}
-	rate := uint64(float64(s.pacingRateBytesPerSecond) * multiplier)
-	s.pacingRateBytesPerSecond = max(rate, s.minimumPacingRate())
+	until := eventTime.Add(duration)
+	if s.pacingCutUntil.IsZero() || until > s.pacingCutUntil {
+		s.pacingCutUntil = until
+	}
+	s.updatePacingRateAt(eventTime)
 }
 
 func (s *adaptiveBDPSender) minimumPacingRate() uint64 {
@@ -1541,6 +1952,7 @@ func (s *adaptiveBDPSender) noteMaterialLossRound() {
 	s.hasMaterialLossRound = true
 	s.lossRecoveryProbeActive = false
 	s.lossRecoveryProbeBW = 0
+	s.stopIdleRestartProbe()
 }
 
 func (s *adaptiveBDPSender) noteLossFreeRound() {
@@ -1655,18 +2067,17 @@ func (s *adaptiveBDPSender) markLossCutback(now monotime.Time) {
 }
 
 func (s *adaptiveBDPSender) canEmergencyCutbackThisRound() bool {
-	return !s.hasLastEmergencyCutback || s.lastEmergencyCutbackRound != s.roundCount
+	return !s.emergencyLossCutbackThisRound
 }
 
 func (s *adaptiveBDPSender) markEmergencyCutbackRound() {
 	s.lastEmergencyCutbackRound = s.roundCount
 	s.hasLastEmergencyCutback = true
+	s.emergencyLossCutbackThisRound = true
 }
 
 func (s *adaptiveBDPSender) handleLossReaction(eventTime monotime.Time, priorInFlight protocol.ByteCount) {
-	s.updateLossEWMA()
 	lossRatio := max(s.roundLossRatio(), s.lossRatioEWMA)
-	s.updateMildLossRounds(lossRatio)
 	if lossRatio <= 0 {
 		return
 	}
@@ -1674,11 +2085,6 @@ func (s *adaptiveBDPSender) handleLossReaction(eventTime monotime.Time, priorInF
 		s.lastStateChangeReason = s.lastLossActionReason
 		return
 	}
-	if s.shouldEmergencyCutback(lossRatio) {
-		s.applyEmergencyLossCutback(eventTime, lossRatio)
-		return
-	}
-
 	hasQueue := s.queuePressure() > 0 || s.hasRecentECNCE()
 	if lossRatio <= s.lossGraceRatio() {
 		s.suppressProbeUpForOneRound("mild_loss_below_grace_no_cwnd_cut")
@@ -1780,10 +2186,13 @@ func (s *adaptiveBDPSender) applyEmergencyLossCutback(eventTime monotime.Time, l
 }
 
 func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample, priorInFlight protocol.ByteCount, eventTime monotime.Time) bool {
+	s.prepareRoundGatedSignals()
 	if s.hasQueuePressure() && s.isPipeFilledForDownshift(priorInFlight) {
-		s.queueHighRounds++
-	} else {
-		s.queueHighRounds = 0
+		if !s.hasLastQueueHighRound || s.lastQueueHighRound != s.roundCount {
+			s.queueHighRounds++
+			s.lastQueueHighRound = s.roundCount
+			s.hasLastQueueHighRound = true
+		}
 	}
 	if s.hasPersistentQueuePressure() {
 		s.lastStateChangeReason = "queue_delay_persistent"
@@ -1796,6 +2205,20 @@ func (s *adaptiveBDPSender) shouldEnterProbeDown(sample RateSample, priorInFligh
 		}
 	}
 	return false
+}
+
+// prepareRoundGatedSignals resets a persistent-signal streak only after a
+// full round passed without a matching positive observation. This makes the
+// result independent of ACK ordering within a round.
+func (s *adaptiveBDPSender) prepareRoundGatedSignals() {
+	if s.hasLastQueueHighRound && s.lastQueueHighRound+1 < s.roundCount {
+		s.queueHighRounds = 0
+		s.hasLastQueueHighRound = false
+	}
+	if s.hasLastDownshiftRound && s.lastDownshiftRound+1 < s.roundCount {
+		s.downshiftRounds = 0
+		s.hasLastDownshiftRound = false
+	}
 }
 
 func (s *adaptiveBDPSender) roundLossRatio() float64 {
@@ -1812,9 +2235,6 @@ func (s *adaptiveBDPSender) lossRate() float64 {
 
 func (s *adaptiveBDPSender) updateLossEWMA() {
 	ratio := s.roundLossRatio()
-	if ratio <= 0 {
-		return
-	}
 	alpha := s.lossEWMAAlpha()
 	if s.lossRatioEWMA == 0 {
 		s.lossRatioEWMA = ratio
@@ -1917,6 +2337,8 @@ func (s *adaptiveBDPSender) cwndGain() float64 {
 		return s.startupCwndGain()
 	case adaptiveBDPProbeDown:
 		return min(s.cruiseCwndGain(), 1.25)
+	case adaptiveBDPProbeRTT:
+		return 1.0
 	default:
 		return s.cruiseCwndGain()
 	}
@@ -1958,7 +2380,7 @@ func (s *adaptiveBDPSender) startupPacingGain() float64 {
 	if required > 0 {
 		gain = max(gain, required)
 	}
-	return min(2.77, max(1.25, gain))
+	return min(2.77, max(1.0, gain))
 }
 
 func (s *adaptiveBDPSender) pacingGain() float64 {

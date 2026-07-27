@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/quic-go/quic-go/internal/congestion"
 	"github.com/quic-go/quic-go/internal/mocks"
@@ -40,15 +41,21 @@ func (h *customFrameHandler) OnAcked(f wire.Frame) {
 }
 
 type captureRateSampleAlgorithm struct {
-	cwnd       protocol.ByteCount
-	numbers    []protocol.PacketNumber
-	ackedBytes []protocol.ByteCount
-	samples    []congestion.RateSample
+	cwnd              protocol.ByteCount
+	numbers           []protocol.PacketNumber
+	ackedBytes        []protocol.ByteCount
+	samples           []congestion.RateSample
+	sentBytesInFlight []protocol.ByteCount
+	sentBytes         []protocol.ByteCount
+	sentAckEliciting  []bool
 }
 
 func (a *captureRateSampleAlgorithm) TimeUntilSend(protocol.ByteCount) monotime.Time { return 0 }
 func (a *captureRateSampleAlgorithm) HasPacingBudget(monotime.Time) bool             { return true }
-func (a *captureRateSampleAlgorithm) OnPacketSent(monotime.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+func (a *captureRateSampleAlgorithm) OnPacketSent(_ monotime.Time, bytesInFlight protocol.ByteCount, _ protocol.PacketNumber, bytes protocol.ByteCount, isAckEliciting bool) {
+	a.sentBytesInFlight = append(a.sentBytesInFlight, bytesInFlight)
+	a.sentBytes = append(a.sentBytes, bytes)
+	a.sentAckEliciting = append(a.sentAckEliciting, isAckEliciting)
 }
 func (a *captureRateSampleAlgorithm) CanSend(protocol.ByteCount) bool { return true }
 func (a *captureRateSampleAlgorithm) MaybeExitSlowStart()             {}
@@ -101,6 +108,31 @@ func (t *packetTracker) NewPingFrame(pn protocol.PacketNumber) Frame {
 
 func (h *sentPacketHandler) getBytesInFlight() protocol.ByteCount {
 	return h.bytesInFlight
+}
+
+func TestSentPacketHandlerPassesPostSendBytesInFlightToCongestionController(t *testing.T) {
+	algorithm := &captureRateSampleAlgorithm{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveServer,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	sph.congestion = algorithm
+
+	now := monotime.Now()
+	packetNumber := sph.PopPacketNumber(protocol.EncryptionInitial)
+	sph.SentPacket(now, packetNumber, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.EncryptionInitial, protocol.ECNNon, 1200, false, false)
+
+	require.Equal(t, []protocol.ByteCount{1200}, algorithm.sentBytesInFlight)
+	require.Equal(t, []protocol.ByteCount{1200}, algorithm.sentBytes)
+	require.Equal(t, []bool{true}, algorithm.sentAckEliciting)
 }
 
 func ackRanges(pns ...protocol.PacketNumber) []wire.AckRange {
@@ -1931,6 +1963,36 @@ func TestRateSamplerMarksAppLimited(t *testing.T) {
 	require.True(t, algo.samples[len(algo.samples)-1].AppLimited)
 }
 
+func TestRateSamplerUsesLatestRTT(t *testing.T) {
+	rttStats := utils.NewRTTStats()
+	// Keep the smoothed RTT deliberately above the next raw measurement.
+	rttStats.UpdateRTT(200*time.Millisecond, 0)
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		rttStats,
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	algo := &captureRateSampleAlgorithm{}
+	sph.congestion = algo
+
+	now := monotime.Now()
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pn)}, protocol.Encryption1RTT, now.Add(100*time.Millisecond))
+	require.NoError(t, err)
+	require.NotEmpty(t, algo.samples)
+	require.Equal(t, 100*time.Millisecond, rttStats.LatestRTT())
+	require.NotEqual(t, rttStats.SmoothedRTT(), rttStats.LatestRTT())
+	require.Equal(t, rttStats.LatestRTT(), algo.samples[len(algo.samples)-1].RTT)
+}
+
 func TestRateSamplerUsesBestSampleFromAckBatch(t *testing.T) {
 	sph := NewSentPacketHandler(
 		0,
@@ -2013,27 +2075,60 @@ func TestMigrationPreservesAdaptiveBDPConfig(t *testing.T) {
 }
 
 func TestDynamicOutstandingPacketLimitForLargeAdaptiveCwnd(t *testing.T) {
-	sph := NewSentPacketHandlerWithCongestionConfig(
-		0,
-		1200,
-		utils.NewRTTStats(),
-		&utils.ConnectionStats{},
-		true,
-		false,
-		nil,
-		protocol.PerspectiveClient,
-		nil,
-		utils.DefaultLogger,
-		CongestionControlConfig{
-			CwndTuning: congestion.CwndTuningConfig{
-				Enable:           true,
-				Algorithm:        congestion.CongestionControlAdaptiveBDP,
-				MaxWindowPackets: 20_000,
-			},
-		},
-	).(*sentPacketHandler)
-	require.Greater(t, sph.maxOutstandingSentPackets(), protocol.MaxOutstandingSentPackets)
-	require.Greater(t, sph.maxTrackedSentPackets(), protocol.MaxTrackedSentPackets)
+	for _, test := range []struct {
+		name        string
+		maxWindow   uint32
+		outstanding int
+		tracked     int
+	}{
+		{"20,000 packets", 20_000, 40_000, 50_000},
+		{"maximum packets", protocol.MaxAdaptiveBDPWindowPackets, 200_000, 250_000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sph := NewSentPacketHandlerWithCongestionConfig(
+				0,
+				1200,
+				utils.NewRTTStats(),
+				&utils.ConnectionStats{},
+				true,
+				false,
+				nil,
+				protocol.PerspectiveClient,
+				nil,
+				utils.DefaultLogger,
+				CongestionControlConfig{
+					CwndTuning: congestion.CwndTuningConfig{
+						Enable:           true,
+						Algorithm:        congestion.CongestionControlAdaptiveBDP,
+						MaxWindowPackets: test.maxWindow,
+					},
+				},
+			).(*sentPacketHandler)
+			require.Equal(t, test.outstanding, sph.maxOutstandingSentPackets())
+			require.Equal(t, test.tracked, sph.maxTrackedSentPackets())
+			require.Greater(t, sph.maxTrackedSentPackets(), sph.maxOutstandingSentPackets())
+		})
+	}
+}
+
+func TestPacketHistoryRecordFitsAdaptiveBDPMemoryBudget(t *testing.T) {
+	const trackedPacketBudgetBytes = 128
+	recordBytes := unsafe.Sizeof(packet{}) + unsafe.Sizeof((*packet)(nil))
+	t.Logf("packet-history record budget: %d bytes", recordBytes)
+	require.LessOrEqual(t, recordBytes, uintptr(trackedPacketBudgetBytes))
+}
+
+func BenchmarkDynamicPacketHistory(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		history := newSentPacketHistory(true)
+		for pn := protocol.PacketNumber(0); pn < 128; pn++ {
+			history.SentPacket(pn, getPacket())
+		}
+		for _, p := range history.packets {
+			putPacket(p)
+		}
+	}
 }
 
 func BenchmarkSendAndAcknowledge(b *testing.B) {

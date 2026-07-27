@@ -627,11 +627,18 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 }
 
 func (h *sentPacketHandler) makeRateSample(p *packet, priorInFlight protocol.ByteCount, rcvTime monotime.Time) congestion.RateSample {
+	rtt := h.rttStats.LatestRTT()
+	if rtt <= 0 {
+		rtt = h.rttStats.SmoothedRTT()
+	}
+	if rtt <= 0 {
+		rtt = h.rttStats.MinRTT()
+	}
 	sample := congestion.RateSample{
 		AckedBytes:     p.Length,
 		DeliveredBytes: h.deliveredBytes,
 		PriorInFlight:  priorInFlight,
-		RTT:            h.rttStats.SmoothedRTT(),
+		RTT:            rtt,
 		AppLimited:     p.IsAppLimited,
 	}
 	if p.DeliveredBytes >= h.deliveredBytes {
@@ -1283,13 +1290,32 @@ func (h *sentPacketHandler) maxOutstandingSentPackets() int {
 	if maxWindow == 0 || maxWindow <= uint32(protocol.MaxCongestionWindowPackets) {
 		return base
 	}
-	return max(base, int(2*maxWindow))
+	if maxWindow > protocol.MaxAdaptiveBDPWindowPackets {
+		return base
+	}
+	limit, ok := checkedPacketHistoryLimit(uint64(maxWindow) * 2)
+	if !ok {
+		return base
+	}
+	return max(base, limit)
 }
 
 func (h *sentPacketHandler) maxTrackedSentPackets() int {
 	base := protocol.MaxTrackedSentPackets
-	maxOutstanding := h.maxOutstandingSentPackets()
-	return max(base, maxOutstanding*5/4)
+	maxOutstanding := uint64(h.maxOutstandingSentPackets())
+	limit, ok := checkedPacketHistoryLimit(maxOutstanding * 5 / 4)
+	if !ok {
+		return base
+	}
+	return max(base, limit)
+}
+
+func checkedPacketHistoryLimit(limit uint64) (int, bool) {
+	maxInt := uint64(^uint(0) >> 1)
+	if limit > maxInt {
+		return 0, false
+	}
+	return int(limit), true
 }
 
 func (h *sentPacketHandler) QueueProbePacket(encLevel protocol.EncryptionLevel) bool {

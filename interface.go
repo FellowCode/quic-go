@@ -35,68 +35,121 @@ const (
 )
 
 type CwndTuning struct {
+	// Enable enables CwndTuning. AdaptiveBDP settings apply only with Algorithm set to CongestionControlAdaptiveBDP.
 	Enable bool
 
+	// Algorithm selects Reno, Cubic, or AdaptiveBDP. The zero value selects Reno.
 	Algorithm CongestionControlAlgorithm
 
+	// InitialWindowPackets is the starting cwnd in packets. Zero uses 32 packets; the effective value must be between MinWindowPackets and MaxWindowPackets.
 	InitialWindowPackets uint32
-	MinWindowPackets     uint32
-	MaxWindowPackets     uint32
+	// MinWindowPackets is the hard cwnd floor in packets. Zero uses 2 packets; the effective value must not exceed InitialWindowPackets.
+	MinWindowPackets uint32
+	// MaxWindowPackets is the exact hard AdaptiveBDP cwnd ceiling in packets. Zero uses 10,000 packets (about 12.8 MB at a 1,280-byte MSS). Accepted values are at most 100,000 packets. The maximum permits 200,000 outstanding and 250,000 tracked packet records, budgeting about 30.5 MiB of packet-history bookkeeping per connection before frame-data overhead; the effective value must not be below InitialWindowPackets.
+	MaxWindowPackets uint32
 
+	// WindowGain is a positive soft multiplier for the BDP-derived cwnd target. Zero uses 1; negative values are invalid.
 	WindowGain float64
 
-	MaxProbeRateBps      uint64
-	MinProbeRateBps      uint64
+	// MaxProbeRateBps is a probe-rate ceiling hint in bits per second. Zero leaves probing uncapped; when both rate bounds are set it must not be below MinProbeRateBps.
+	MaxProbeRateBps uint64
+	// MinProbeRateBps is a soft no-congestion pacing floor in bits per second. Zero uses the StartupTargetRateBps-derived floor; it must not exceed an explicit MaxProbeRateBps.
+	MinProbeRateBps uint64
+	// StartupTargetRateBps is a soft known-capacity startup target in bits per second. Zero disables the target; it is not a guaranteed or hard minimum rate.
 	StartupTargetRateBps uint64
 
+	// StartupTargetDuration is the non-negative time hint for growth toward StartupTargetRateBps. Zero uses 5 seconds.
 	StartupTargetDuration time.Duration
-	StartupPacingGain     float64
-	StartupCwndGain       float64
+	// StartupPacingGain is a soft Startup pacing multiplier. Zero uses 2; an explicit value must be in [1, 2.77] and may be raised to pursue StartupTargetRateBps.
+	StartupPacingGain float64
+	// StartupCwndGain is the Startup cwnd-target multiplier. Zero uses 2; a non-zero value must be at least 1.
+	StartupCwndGain float64
 
-	ProbeUpGain      float64
-	ProbeDownGain    float64
+	// ProbeUpGain is the per-round ProbeUp pacing multiplier hint. Zero uses 1.25; a non-zero value must be at least 1.
+	ProbeUpGain float64
+	// ProbeDownGain is the ProbeDown pacing multiplier in [0, 1]. Zero uses 0.90.
+	ProbeDownGain float64
+	// CruisePacingGain is a non-negative steady-state pacing multiplier. Zero uses 1.05.
 	CruisePacingGain float64
-	CruiseCwndGain   float64
+	// CruiseCwndGain is a non-negative steady-state cwnd-target multiplier. Zero uses 1.5.
+	CruiseCwndGain float64
 
-	QueueTarget           time.Duration
+	// QueueTarget is a non-negative soft queue-delay target. Zero derives a target from min RTT, bounded to 5–25 ms.
+	QueueTarget time.Duration
+	// QueuePersistentRounds is the positive confirmation count in AdaptiveBDP rounds for persistent queue evidence. Zero uses 3 rounds.
 	QueuePersistentRounds uint32
 
-	LossTarget                       float64
-	LossGraceRatio                   float64
-	LossSoftThreshold                float64
-	LossSevereThreshold              float64
-	EmergencyLossThreshold           float64
-	LossMinBytes                     uint64
-	EmergencyLossMinBytes            uint64
-	MinLossSampleBytes               uint64
-	LossEWMAAlpha                    float64
-	MaxLossCwndCutNoQueue            float64
-	MaxLossCwndCutWithQueue          float64
-	MinLossCwndCut                   float64
-	MaxLossPacingCutNoQueue          float64
-	MaxLossPacingCutWithQueue        float64
-	LossCutbackCooldown              time.Duration
-	MildLossPersistentRounds         uint32
-	LossRecoveryProbeRounds          uint32
-	LossRecoveryProbeGain            float64
-	LossRecoveryProbeDurationRounds  uint32
+	// LossTarget is the target loss ratio in [0, 1]. Zero uses the controller default.
+	LossTarget float64
+	// LossGraceRatio is the no-cwnd-cut loss ratio in [0, 1]. Zero uses the controller default.
+	LossGraceRatio float64
+	// LossSoftThreshold is the proportional-loss threshold in [0, 1]. Zero uses LossGraceRatio.
+	LossSoftThreshold float64
+	// LossSevereThreshold is the severe-loss threshold in [0, 1]. Zero uses the controller default.
+	LossSevereThreshold float64
+	// EmergencyLossThreshold is the emergency-loss threshold in [0, 1]. Zero uses the controller default.
+	EmergencyLossThreshold float64
+	// LossMinBytes is the minimum lost-byte observation for loss reaction. Zero uses the controller default.
+	LossMinBytes uint64
+	// EmergencyLossMinBytes is the minimum lost-byte observation for emergency reaction. Zero uses the controller default.
+	EmergencyLossMinBytes uint64
+	// MinLossSampleBytes is the minimum total ACKed plus lost byte sample. Zero uses the controller default.
+	MinLossSampleBytes uint64
+	// LossEWMAAlpha is the loss-memory weighting fraction. Zero uses 0.25; an explicit value must be in [0.01, 1].
+	LossEWMAAlpha float64
+	// MaxLossCwndCutNoQueue is the hard no-queue cwnd cut cap as a fraction in [0, 0.5]. Zero uses 0.15.
+	MaxLossCwndCutNoQueue float64
+	// MaxLossCwndCutWithQueue is the hard queued-loss cwnd cut cap as a fraction in [0, 0.5]. Zero uses 0.30.
+	MaxLossCwndCutWithQueue float64
+	// MinLossCwndCut is the proportional cwnd cut floor as a fraction in [0, 0.1]. Zero uses 0.01.
+	MinLossCwndCut float64
+	// MaxLossPacingCutNoQueue is the hard no-queue pacing cut cap as a fraction in [0, 0.5]. Zero uses 0.10.
+	MaxLossPacingCutNoQueue float64
+	// MaxLossPacingCutWithQueue is the hard queued-loss pacing cut cap as a fraction in [0, 0.5]. Zero uses 0.25.
+	MaxLossPacingCutWithQueue float64
+	// LossCutbackCooldown is the minimum time between loss cutbacks. Zero uses the controller default; it must not be negative.
+	LossCutbackCooldown time.Duration
+	// MildLossPersistentRounds is the number of loss rounds required before a no-queue cutback. Zero uses the controller default.
+	MildLossPersistentRounds uint32
+	// LossRecoveryProbeRounds is the number of loss-free rounds before recovery probing. Zero uses the controller default.
+	LossRecoveryProbeRounds uint32
+	// LossRecoveryProbeGain is the per-round recovery probe multiplier hint. Zero uses 1.25; an explicit value must be in [1.01, 2].
+	LossRecoveryProbeGain float64
+	// LossRecoveryProbeDurationRounds is the maximum recovery-probe lifetime in rounds. Zero uses the controller default.
+	LossRecoveryProbeDurationRounds uint32
+	// LossRecoveryClearShortBwFraction is the short-bandwidth recovery threshold fraction. Zero uses 0.95; an explicit value must be in [0.5, 1].
 	LossRecoveryClearShortBwFraction float64
 
+	// BandwidthFilterRounds is the max-bandwidth filter window in rounds. Zero uses the controller default.
 	BandwidthFilterRounds uint32
-	DownshiftRounds       uint32
-	DownshiftRatio        float64
+	// DownshiftRounds is the generic downshift confirmation count in rounds. Zero uses the controller default.
+	DownshiftRounds uint32
+	// DownshiftRatio is the low-sample ratio in [0, 1]. Zero uses the controller default.
+	DownshiftRatio float64
 
+	// NoCongestionRateFloorFraction is the soft StartupTargetRateBps floor fraction in [0, 1]. Zero uses 0.5 unless DisableNoCongestionRateFloor is set.
 	NoCongestionRateFloorFraction float64
-	NoCongestionDownshiftRounds   uint32
-	NoCongestionDownshiftFactor   float64
-	UploadWarmupDuration          time.Duration
-	UploadWarmupBytes             uint64
-	MinDownshiftSampleBytes       uint64
-	CongestionDownshiftRounds     uint32
+	// DisableNoCongestionRateFloor explicitly selects a zero no-congestion floor even when StartupTargetRateBps is configured.
+	DisableNoCongestionRateFloor bool
+	// NoCongestionDownshiftRounds is the low-sample confirmation count in rounds. Zero uses the controller default.
+	NoCongestionDownshiftRounds uint32
+	// NoCongestionDownshiftFactor is the retained-bandwidth multiplier per no-congestion downshift in [0, 1]. Zero uses 0.75.
+	NoCongestionDownshiftFactor float64
+	// UploadWarmupDuration is the post-idle downshift grace duration. Zero uses the controller default; it must not be negative.
+	UploadWarmupDuration time.Duration
+	// UploadWarmupBytes is the post-idle ACKed-byte grace threshold. Zero uses the controller default.
+	UploadWarmupBytes uint64
+	// MinDownshiftSampleBytes is the minimum ACKed-byte downshift sample. Zero uses the controller default.
+	MinDownshiftSampleBytes uint64
+	// CongestionDownshiftRounds is the congestion-confirmed downshift count in rounds. Zero uses the controller default.
+	CongestionDownshiftRounds uint32
 
+	// MinRTTFilterWindow is the min-RTT filter lifetime. Zero uses the controller default; it must not be negative.
 	MinRTTFilterWindow time.Duration
-	ProbeInterval      time.Duration
+	// ProbeInterval is the minimum interval between ordinary ProbeUp attempts. Zero uses the controller default; it must not be negative.
+	ProbeInterval time.Duration
 
+	// PacingMargin is the pacing safety fraction in [0, 0.99]. Zero uses the controller default.
 	PacingMargin float64
 }
 

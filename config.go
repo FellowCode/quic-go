@@ -26,6 +26,11 @@ func validateConfig(config *Config) error {
 	if config == nil {
 		return nil
 	}
+	if config.CwndTuning.Algorithm == CongestionControlAdaptiveBDP {
+		if err := validateAdaptiveBDPCwndTuning(config.CwndTuning); err != nil {
+			return err
+		}
+	}
 	const maxStreams = 1 << 60
 	if config.MaxIncomingStreams > maxStreams {
 		config.MaxIncomingStreams = maxStreams
@@ -160,6 +165,140 @@ func validateConfig(config *Config) error {
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
 			return fmt.Errorf("invalid QUIC version: %s", v)
+		}
+	}
+	return nil
+}
+
+func validateAdaptiveBDPCwndTuning(c CwndTuning) error {
+	const (
+		defaultMinWindowPackets     = 2
+		defaultInitialWindowPackets = 32
+	)
+	minWindow := c.MinWindowPackets
+	if minWindow == 0 {
+		minWindow = defaultMinWindowPackets
+	}
+	initialWindow := c.InitialWindowPackets
+	if initialWindow == 0 {
+		initialWindow = defaultInitialWindowPackets
+	}
+	maxWindow := c.MaxWindowPackets
+	if maxWindow == 0 {
+		maxWindow = protocol.MaxCongestionWindowPackets
+	}
+	if c.MaxWindowPackets > protocol.MaxAdaptiveBDPWindowPackets {
+		return fmt.Errorf(
+			"invalid AdaptiveBDP MaxWindowPackets: must not exceed %d (got %d)",
+			protocol.MaxAdaptiveBDPWindowPackets,
+			c.MaxWindowPackets,
+		)
+	}
+	if minWindow > initialWindow || initialWindow > maxWindow {
+		return fmt.Errorf(
+			"invalid AdaptiveBDP effective window limits: require MinWindowPackets (%d) <= InitialWindowPackets (%d) <= MaxWindowPackets (%d)",
+			minWindow,
+			initialWindow,
+			maxWindow,
+		)
+	}
+
+	for name, value := range map[string]float64{
+		"LossTarget":                    c.LossTarget,
+		"LossGraceRatio":                c.LossGraceRatio,
+		"LossSoftThreshold":             c.LossSoftThreshold,
+		"LossSevereThreshold":           c.LossSevereThreshold,
+		"EmergencyLossThreshold":        c.EmergencyLossThreshold,
+		"DownshiftRatio":                c.DownshiftRatio,
+		"NoCongestionRateFloorFraction": c.NoCongestionRateFloorFraction,
+		"NoCongestionDownshiftFactor":   c.NoCongestionDownshiftFactor,
+	} {
+		if value < 0 || value > 1 {
+			return fmt.Errorf("invalid AdaptiveBDP %s: must be in [0, 1]", name)
+		}
+	}
+	for name, value := range map[string]float64{
+		"MaxLossCwndCutNoQueue":     c.MaxLossCwndCutNoQueue,
+		"MaxLossCwndCutWithQueue":   c.MaxLossCwndCutWithQueue,
+		"MaxLossPacingCutNoQueue":   c.MaxLossPacingCutNoQueue,
+		"MaxLossPacingCutWithQueue": c.MaxLossPacingCutWithQueue,
+	} {
+		if value < 0 || value > 0.5 {
+			return fmt.Errorf("invalid AdaptiveBDP %s: must be in [0, 0.5]", name)
+		}
+	}
+	if c.MinLossCwndCut < 0 || c.MinLossCwndCut > 0.1 {
+		return fmt.Errorf("invalid AdaptiveBDP MinLossCwndCut: must be in [0, 0.1]")
+	}
+	if c.LossEWMAAlpha < 0 || (c.LossEWMAAlpha > 0 && c.LossEWMAAlpha < 0.01) || c.LossEWMAAlpha > 1 {
+		return fmt.Errorf("invalid AdaptiveBDP LossEWMAAlpha: must be zero or in [0.01, 1]")
+	}
+	if c.LossRecoveryClearShortBwFraction < 0 ||
+		(c.LossRecoveryClearShortBwFraction > 0 && c.LossRecoveryClearShortBwFraction < 0.5) ||
+		c.LossRecoveryClearShortBwFraction > 1 {
+		return fmt.Errorf("invalid AdaptiveBDP LossRecoveryClearShortBwFraction: must be zero or in [0.5, 1]")
+	}
+	grace := c.LossGraceRatio
+	if grace == 0 {
+		grace = 0.01
+	}
+	soft := c.LossSoftThreshold
+	if soft == 0 {
+		soft = grace
+	}
+	severe := c.LossSevereThreshold
+	if severe == 0 {
+		severe = 0.05
+	}
+	emergency := c.EmergencyLossThreshold
+	if emergency == 0 {
+		emergency = 0.10
+	}
+	if grace > soft || soft > severe || severe > emergency {
+		return fmt.Errorf("invalid AdaptiveBDP loss thresholds: require LossGraceRatio <= LossSoftThreshold <= LossSevereThreshold <= EmergencyLossThreshold")
+	}
+	if c.WindowGain < 0 {
+		return fmt.Errorf("invalid AdaptiveBDP WindowGain: must not be negative")
+	}
+	if c.ProbeDownGain < 0 || c.ProbeDownGain > 1 {
+		return fmt.Errorf("invalid AdaptiveBDP ProbeDownGain: must be in [0, 1]")
+	}
+	if c.ProbeUpGain < 0 || (c.ProbeUpGain > 0 && c.ProbeUpGain < 1) {
+		return fmt.Errorf("invalid AdaptiveBDP ProbeUpGain: must be at least 1 when set")
+	}
+	if c.StartupPacingGain < 0 || (c.StartupPacingGain > 0 && c.StartupPacingGain < 1) || c.StartupPacingGain > 2.77 {
+		return fmt.Errorf("invalid AdaptiveBDP StartupPacingGain: must be zero or in [1, 2.77]")
+	}
+	if c.StartupCwndGain < 0 || (c.StartupCwndGain > 0 && c.StartupCwndGain < 1) {
+		return fmt.Errorf("invalid AdaptiveBDP StartupCwndGain: must be at least 1 when set")
+	}
+	if c.CruisePacingGain < 0 {
+		return fmt.Errorf("invalid AdaptiveBDP CruisePacingGain: must not be negative")
+	}
+	if c.CruiseCwndGain < 0 {
+		return fmt.Errorf("invalid AdaptiveBDP CruiseCwndGain: must not be negative")
+	}
+	if c.LossRecoveryProbeGain < 0 ||
+		(c.LossRecoveryProbeGain > 0 && c.LossRecoveryProbeGain < 1.01) ||
+		c.LossRecoveryProbeGain > 2 {
+		return fmt.Errorf("invalid AdaptiveBDP LossRecoveryProbeGain: must be zero or in [1.01, 2]")
+	}
+	if c.MinProbeRateBps > 0 && c.MaxProbeRateBps > 0 && c.MinProbeRateBps > c.MaxProbeRateBps {
+		return fmt.Errorf("invalid AdaptiveBDP probe rates: MinProbeRateBps must not exceed MaxProbeRateBps")
+	}
+	if c.PacingMargin < 0 || c.PacingMargin > 0.99 {
+		return fmt.Errorf("invalid AdaptiveBDP PacingMargin: must be in [0, 0.99]")
+	}
+	for name, value := range map[string]time.Duration{
+		"StartupTargetDuration": c.StartupTargetDuration,
+		"QueueTarget":           c.QueueTarget,
+		"LossCutbackCooldown":   c.LossCutbackCooldown,
+		"UploadWarmupDuration":  c.UploadWarmupDuration,
+		"MinRTTFilterWindow":    c.MinRTTFilterWindow,
+		"ProbeInterval":         c.ProbeInterval,
+	} {
+		if value < 0 {
+			return fmt.Errorf("invalid AdaptiveBDP %s: must not be negative", name)
 		}
 	}
 	return nil

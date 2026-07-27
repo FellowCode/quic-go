@@ -79,6 +79,84 @@ func TestConfigValidation(t *testing.T) {
 	})
 }
 
+func TestAdaptiveBDPCwndTuningValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		tune CwndTuning
+	}{
+		{"window limits", CwndTuning{MinWindowPackets: 20, InitialWindowPackets: 10, MaxWindowPackets: 30}},
+		{"effective minimum above default initial", CwndTuning{MinWindowPackets: 33}},
+		{"effective maximum below default initial", CwndTuning{MaxWindowPackets: 31}},
+		{"effective initial above default maximum", CwndTuning{InitialWindowPackets: protocol.MaxCongestionWindowPackets + 1}},
+		{"partial minimum above explicit maximum", CwndTuning{MinWindowPackets: 100, MaxWindowPackets: 50}},
+		{"maximum above AdaptiveBDP limit", CwndTuning{MaxWindowPackets: protocol.MaxAdaptiveBDPWindowPackets + 1}},
+		{"one bit above signed uint32 boundary", CwndTuning{MaxWindowPackets: 1 << 31}},
+		{"one below signed uint32 boundary", CwndTuning{MaxWindowPackets: (1 << 31) - 1}},
+		{"one above signed uint32 boundary", CwndTuning{MaxWindowPackets: (1 << 31) + 1}},
+		{"maximum uint32", CwndTuning{MaxWindowPackets: ^uint32(0)}},
+		{"ratio", CwndTuning{LossGraceRatio: 1.1}},
+		{"negative probe down gain", CwndTuning{ProbeDownGain: -0.1}},
+		{"negative window gain", CwndTuning{WindowGain: -0.1}},
+		{"loss threshold order", CwndTuning{LossGraceRatio: 0.05, LossSoftThreshold: 0.04, LossSevereThreshold: 0.06, EmergencyLossThreshold: 0.1}},
+		{"probe down gain", CwndTuning{ProbeDownGain: 1.1}},
+		{"probe up gain", CwndTuning{ProbeUpGain: 0.9}},
+		{"startup gain", CwndTuning{StartupPacingGain: 0.9}},
+		{"startup gain above controller limit", CwndTuning{StartupPacingGain: 3}},
+		{"loss EWMA below controller limit", CwndTuning{LossEWMAAlpha: 0.001}},
+		{"loss cwnd cap above controller limit", CwndTuning{MaxLossCwndCutNoQueue: 0.6}},
+		{"minimum loss cut above controller limit", CwndTuning{MinLossCwndCut: 0.2}},
+		{"loss recovery fraction below controller limit", CwndTuning{LossRecoveryClearShortBwFraction: 0.4}},
+		{"loss recovery gain below controller limit", CwndTuning{LossRecoveryProbeGain: 1.001}},
+		{"loss recovery gain above controller limit", CwndTuning{LossRecoveryProbeGain: 2.1}},
+		{"probe rate order", CwndTuning{MinProbeRateBps: 20_000_000, MaxProbeRateBps: 10_000_000}},
+		{"negative duration", CwndTuning{ProbeInterval: -time.Second}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := &Config{CwndTuning: test.tune}
+			config.CwndTuning.Algorithm = CongestionControlAdaptiveBDP
+			require.Error(t, validateConfig(config))
+		})
+	}
+
+	err := validateConfig(&Config{CwndTuning: CwndTuning{
+		Algorithm:        CongestionControlAdaptiveBDP,
+		MaxWindowPackets: protocol.MaxAdaptiveBDPWindowPackets + 1,
+	}})
+	require.ErrorContains(t, err, "MaxWindowPackets: must not exceed")
+
+	require.NoError(t, validateConfig(&Config{CwndTuning: CwndTuning{
+		Algorithm:                    CongestionControlAdaptiveBDP,
+		MinWindowPackets:             10,
+		InitialWindowPackets:         20,
+		MaxWindowPackets:             30,
+		LossGraceRatio:               0.01,
+		LossSoftThreshold:            0.02,
+		LossSevereThreshold:          0.05,
+		EmergencyLossThreshold:       0.10,
+		ProbeDownGain:                0.9,
+		ProbeUpGain:                  1.25,
+		StartupPacingGain:            2,
+		StartupCwndGain:              2,
+		PacingMargin:                 0.01,
+		DisableNoCongestionRateFloor: true,
+	}}))
+
+	for _, tune := range []CwndTuning{
+		{Algorithm: CongestionControlAdaptiveBDP},
+		{Algorithm: CongestionControlAdaptiveBDP, MinWindowPackets: 2},
+		{Algorithm: CongestionControlAdaptiveBDP, InitialWindowPackets: 32},
+		{Algorithm: CongestionControlAdaptiveBDP, MaxWindowPackets: protocol.MaxCongestionWindowPackets},
+		{Algorithm: CongestionControlAdaptiveBDP, MaxWindowPackets: 5_000},
+		{Algorithm: CongestionControlAdaptiveBDP, MaxWindowPackets: 20_000},
+		{Algorithm: CongestionControlAdaptiveBDP, MaxWindowPackets: protocol.MaxAdaptiveBDPWindowPackets},
+		{Algorithm: CongestionControlAdaptiveBDP, MinWindowPackets: 2, InitialWindowPackets: 16, MaxWindowPackets: 16},
+		{Algorithm: CongestionControlAdaptiveBDP, StartupPacingGain: 1},
+	} {
+		require.NoError(t, validateConfig(&Config{CwndTuning: tune}))
+	}
+}
+
 func TestConfigHandshakeIdleTimeout(t *testing.T) {
 	c := &Config{HandshakeIdleTimeout: time.Second * 11 / 2}
 	require.Equal(t, 11*time.Second, c.handshakeTimeout())

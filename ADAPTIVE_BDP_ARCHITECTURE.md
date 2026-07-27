@@ -3,6 +3,11 @@
 This document describes the current AdaptiveBDP congestion controller architecture in this fork of `quic-go`.
 It is intended as a maintenance guide for the implementation in `internal/congestion/adaptive_bdp_sender.go` and the public tuning/debug API in `interface.go`.
 
+Related implementation documents:
+
+- `ADAPTIVE_BDP_FIX_INSTRUCTIONS.md` defines the ordered repair work packages and regression requirements.
+- `ADAPTIVE_BDP_VALIDATION_PLAN.md` defines the VPN network scenarios, telemetry, and readiness gates.
+
 ## Goals
 
 AdaptiveBDP is a BDP-oriented congestion controller for high-throughput paths where the sender often has an expected or recently observed capacity. It tries to:
@@ -282,4 +287,3 @@ The AdaptiveBDP tests in `internal/congestion/adaptive_bdp_sender_test.go` cover
 - eventual gradual adaptation to a real no-queue bandwidth drop;
 - proportional loss reaction;
 - public debug info propagation.
-

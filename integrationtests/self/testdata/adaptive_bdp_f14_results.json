@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "command": "go test -count=1 -v ./integrationtests/self -run TestAdaptiveBDPDeterministicLink",
+  "clock": "testing/synctest virtual time; deterministic link tick 100us",
+  "results": [
+    {
+      "scenario": "bulk-transfer",
+      "elapsed": "104.9ms",
+      "delivered_bytes": 104550,
+      "submitted_bytes": 104550,
+      "peak_queue_bytes": 42976,
+      "min_rtt": "11ms",
+      "cwnd_bytes": 21760,
+      "pacing_bytes_per_second": 1303405,
+      "bandwidth_bytes_per_second": 1253877
+    },
+    {
+      "scenario": "T03",
+      "elapsed": "2.6585s",
+      "delivered_bytes": 4296402,
+      "submitted_bytes": 4296492,
+      "peak_queue_bytes": 545280,
+      "min_rtt": "217ms",
+      "cwnd_bytes": 1223680,
+      "pacing_bytes_per_second": 3899917,
+      "bandwidth_bytes_per_second": 3751724
+    },
+    {
+      "scenario": "L01",
+      "seed": 1,
+      "elapsed": "482.3ms",
+      "application_goodput_bits_per_second": 17392925,
+      "min_rtt": "50.3ms",
+      "peak_queue_bytes": 151040,
+      "tail_drops": 0,
+      "cwnd_bytes": 252160,
+      "pacing_bytes_per_second": 3903899
+    },
+    {
+      "scenario": "L02",
+      "seed": 12,
+      "elapsed": "855.2ms",
+      "application_goodput_bits_per_second": 9808942,
+      "min_rtt": "100.2ms",
+      "peak_queue_bytes": 177920,
+      "tail_drops": 0,
+      "cwnd_bytes": 561920,
+      "pacing_bytes_per_second": 3497999
+    },
+    {
+      "scenario": "L03",
+      "seed": 13,
+      "elapsed": "1.2863s",
+      "application_goodput_bits_per_second": 6521501,
+      "min_rtt": "150.2ms",
+      "peak_queue_bytes": 218744,
+      "tail_drops": 0,
+      "cwnd_bytes": 625116,
+      "pacing_bytes_per_second": 3706852
+    },
+    {
+      "scenario": "L04",
+      "loss_model": "2ms deterministic burst at 200ms",
+      "scripted_loss_packets": 10,
+      "repeated_runs": 3,
+      "virtual_elapsed_range": ["400.5ms", "413.8ms"],
+      "application_goodput_bits_per_second_range": [40544262, 41890676],
+      "min_rtt_range": ["40.2ms", "40.3ms"],
+      "peak_queue_bytes_range": [323840, 656640],
+      "tail_drops": 0,
+      "pacing_bytes_per_second_range": [12993750, 15468750]
+    },
+    {
+      "scenario": "L05",
+      "seed": 505,
+      "loss_model": "Gilbert-Elliott",
+      "correlated_losses": 34,
+      "tail_drops": 0,
+      "application_goodput_bits_per_second_range": [3776610, 3778482],
+      "queue_delay_p50": "52.224ms",
+      "queue_delay_p95_range": ["70.6816ms", "71.7048ms"],
+      "queue_delay_p99": "72.732ms",
+      "cwnd_bytes": 259840,
+      "pacing_bytes_per_second_range": [802781, 804387]
+    },
+    {
+      "scenario": "T05",
+      "elapsed": "19.0109s",
+      "delivered_bytes": 1082121,
+      "submitted_bytes": 1082121,
+      "peak_queue_bytes": 69120,
+      "min_rtt": "210.4ms",
+      "cwnd_bytes": 5120,
+      "pacing_bytes_per_second": 6250000,
+      "bandwidth_bytes_per_second": 249937
+    },
+    {
+      "scenario": "Q02",
+      "elapsed": "15.6733s",
+      "delivered_bytes": 5064759,
+      "submitted_bytes": 5064759,
+      "peak_queue_bytes": 769385,
+      "min_rtt": "50.8ms",
+      "cwnd_bytes": 2560,
+      "pacing_bytes_per_second": 6250000,
+      "bandwidth_bytes_per_second": 1024872
+    }
+  ]
+}

@@ -3333,6 +3333,7 @@ func toCongestionCwndTuningConfig(c CwndTuning) congestion.CwndTuningConfig {
 		DownshiftRounds:                  c.DownshiftRounds,
 		DownshiftRatio:                   c.DownshiftRatio,
 		NoCongestionRateFloorFraction:    c.NoCongestionRateFloorFraction,
+		DisableNoCongestionRateFloor:     c.DisableNoCongestionRateFloor,
 		NoCongestionDownshiftRounds:      c.NoCongestionDownshiftRounds,
 		NoCongestionDownshiftFactor:      c.NoCongestionDownshiftFactor,
 		UploadWarmupDuration:             c.UploadWarmupDuration,
