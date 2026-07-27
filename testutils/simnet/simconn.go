@@ -26,7 +26,8 @@ type Packet struct {
 	To   net.Addr
 	From net.Addr
 
-	Data []byte
+	Data      []byte
+	ECNMarked bool
 }
 
 // SimConn is a simulated network connection that implements net.PacketConn.
@@ -159,16 +160,24 @@ func (c *SimConn) Close() error {
 }
 
 func (c *SimConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, addr, _, err = c.ReadFromWithECN(p)
+	return n, addr, err
+}
+
+// ReadFromWithECN is ReadFrom plus the deterministic link's ECN-CE delivery
+// annotation. It is for virtual network adapters that expose received ECN via
+// UDP ancillary data; normal PacketConn users should use ReadFrom.
+func (c *SimConn) ReadFromWithECN(p []byte) (n int, addr net.Addr, ecnMarked bool, err error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return 0, nil, net.ErrClosed
+		return 0, nil, false, net.ErrClosed
 	}
 	deadline := c.readDeadline
 	c.mu.Unlock()
 
 	if !deadline.IsZero() && !time.Now().Before(deadline) {
-		return 0, nil, ErrDeadlineExceeded
+		return 0, nil, false, ErrDeadlineExceeded
 	}
 
 	var pkt Packet
@@ -180,18 +189,18 @@ func (c *SimConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case pkt = <-c.packetsToRead:
 	case <-c.closedChan:
-		return 0, nil, net.ErrClosed
+		return 0, nil, false, net.ErrClosed
 	case <-c.deadlineUpdated:
-		return c.ReadFrom(p)
+		return c.ReadFromWithECN(p)
 	case <-deadlineTimer:
-		return 0, nil, ErrDeadlineExceeded
+		return 0, nil, false, ErrDeadlineExceeded
 	}
 
 	n = copy(p, pkt.Data)
 	// if the provided buffer is not enough to read the whole packet, we drop
 	// the rest of the data. this is similar to what `recvfrom` does on Linux
 	// and macOS.
-	return n, pkt.From, nil
+	return n, pkt.From, pkt.ECNMarked, nil
 }
 
 func (c *SimConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {

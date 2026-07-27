@@ -373,6 +373,48 @@ func TestAdaptiveBDPDisableNoCongestionRateFloor(t *testing.T) {
 	require.Zero(t, s.noCongestionCwndFloor())
 }
 
+func TestAdaptiveBDPConfirmedCongestionDownshiftOverridesStaleStartupFloor(t *testing.T) {
+	clock := mockClock(monotime.Now())
+	s := NewAdaptiveBDPSender(
+		&clock,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{Enable: true, StartupTargetRateBps: 100_000_000},
+	)
+	s.state = adaptiveBDPProbeBW
+	s.minRTT = 30 * time.Millisecond
+	s.maxBw = mbitToBytesPerSecond(100)
+	s.shortBw = mbitToBytesPerSecond(10)
+	s.shortBwCongestionConfirmed = true
+	s.bw = s.shortBw
+
+	require.Equal(t, mbitToBytesPerSecond(10), s.noCongestionRateFloorBytesPerSecond())
+	require.Less(t, s.noCongestionCwndFloor(), protocol.ByteCount(64*1280))
+	s.updatePacingRate()
+	require.Less(t, s.pacingRateBytesPerSecond, mbitToBytesPerSecond(15), "a drained queue must not restore the stale 100 Mbit/s startup floor")
+}
+
+func TestAdaptiveBDPAgedOutMaxBandwidthRevokesValidatedStartupFloor(t *testing.T) {
+	clock := mockClock(monotime.Now())
+	s := NewAdaptiveBDPSender(
+		&clock,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		1280,
+		CwndTuningConfig{Enable: true, StartupTargetRateBps: 100_000_000},
+	)
+	s.state = adaptiveBDPProbeBW
+	s.minRTT = 30 * time.Millisecond
+	s.maxBw = mbitToBytesPerSecond(10)
+	s.bw = s.maxBw
+	s.startupTargetRateValidated = true
+
+	require.Equal(t, mbitToBytesPerSecond(10), s.noCongestionRateFloorBytesPerSecond())
+	s.updatePacingRate()
+	require.Less(t, s.pacingRateBytesPerSecond, mbitToBytesPerSecond(15), "an aged-out 100 Mbit/s estimate must not keep pacing at its startup floor")
+}
+
 func TestAdaptiveBDPExplicitStartupPacingGainOfOneIsHonored(t *testing.T) {
 	clock := mockClock(monotime.Now())
 	s := NewAdaptiveBDPSender(

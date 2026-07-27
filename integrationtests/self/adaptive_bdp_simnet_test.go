@@ -280,6 +280,180 @@ func TestAdaptiveBDPDeterministicLinkIdleDownloadToUpload(t *testing.T) {
 	})
 }
 
+func TestAdaptiveBDPDeterministicLinkInteractiveDatagramBidirectionalAndBulk(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clientAddr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 13), Port: 9013}
+		serverAddr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 14), Port: 9014}
+		linkConfig := simnet.DeterministicLinkConfig{
+			Forward: simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 20_000_000, BaseLatency: 15 * time.Millisecond, QueueLimitBytes: 256 * 1024},
+			Reverse: simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 20_000_000, BaseLatency: 15 * time.Millisecond, QueueLimitBytes: 256 * 1024},
+		}
+		link := simnet.NewDeterministicLink(linkConfig)
+		router := simnet.NewDeterministicRouter(link, func(packet simnet.Packet) simnet.LinkDirection {
+			if packet.From.String() == clientAddr.String() {
+				return simnet.LinkForward
+			}
+			return simnet.LinkReverse
+		})
+		clientPacketConn := simnet.NewBufferedSimConn(clientAddr, router, 4096)
+		serverPacketConn := simnet.NewBufferedSimConn(serverAddr, router, 4096)
+		defer clientPacketConn.Close()
+		defer serverPacketConn.Close()
+		stopPump, _ := startDeterministicLinkPump(router)
+		pumpStopped := false
+		defer func() {
+			if !pumpStopped {
+				stopPump()
+			}
+		}()
+
+		config := getQuicConfig(&quic.Config{
+			EnableDatagrams: true,
+			CwndTuning:      quic.CwndTuning{Enable: true, Algorithm: quic.CongestionControlAdaptiveBDP, StartupTargetRateBps: 20_000_000},
+		})
+		ln, err := quic.Listen(serverPacketConn, getTLSConfig(), config)
+		require.NoError(t, err)
+		defer ln.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		clientConn, err := quic.Dial(ctx, clientPacketConn, serverAddr, getTLSClientConfig(), config)
+		require.NoError(t, err)
+		defer clientConn.CloseWithError(0, "")
+		serverConn, err := ln.Accept(ctx)
+		require.NoError(t, err)
+		defer serverConn.CloseWithError(0, "")
+		trafficStart := time.Now()
+
+		const datagrams = 100
+		const interval = 100 * time.Millisecond
+		sendDatagrams := func(conn *quic.Conn, prefix byte) <-chan error {
+			done := make(chan error, 1)
+			go func() {
+				for i := 0; i < datagrams; i++ {
+					if err := conn.SendDatagram(bytes.Repeat([]byte{prefix}, 256)); err != nil {
+						done <- err
+						return
+					}
+					<-time.After(interval)
+				}
+				done <- nil
+			}()
+			return done
+		}
+		receiveDatagrams := func(conn *quic.Conn, prefix byte) <-chan error {
+			done := make(chan error, 1)
+			go func() {
+				for i := 0; i < datagrams; i++ {
+					data, err := conn.ReceiveDatagram(ctx)
+					if err != nil {
+						done <- err
+						return
+					}
+					if !bytes.Equal(data, bytes.Repeat([]byte{prefix}, 256)) {
+						done <- errors.New("unexpected interactive datagram")
+						return
+					}
+				}
+				done <- nil
+			}()
+			return done
+		}
+		clientSends := sendDatagrams(clientConn, 'c')
+		serverSends := sendDatagrams(serverConn, 's')
+		clientReceives := receiveDatagrams(clientConn, 's')
+		serverReceives := receiveDatagrams(serverConn, 'c')
+		require.NoError(t, <-clientSends)
+		require.NoError(t, <-serverSends)
+		require.NoError(t, <-clientReceives)
+		require.NoError(t, <-serverReceives)
+
+		clientPayload := bytes.Repeat([]byte("client-bidirectional"), 4096)
+		serverPayload := bytes.Repeat([]byte("server-bidirectional"), 4096)
+		streamReads := make(chan error, 2)
+		go func() {
+			stream, err := serverConn.AcceptStream(ctx)
+			if err == nil {
+				data, readErr := io.ReadAll(stream)
+				if readErr == nil && !bytes.Equal(data, clientPayload) {
+					readErr = errors.New("unexpected client bidirectional payload")
+				}
+				err = readErr
+			}
+			streamReads <- err
+		}()
+		go func() {
+			stream, err := clientConn.AcceptStream(ctx)
+			if err == nil {
+				data, readErr := io.ReadAll(stream)
+				if readErr == nil && !bytes.Equal(data, serverPayload) {
+					readErr = errors.New("unexpected server bidirectional payload")
+				}
+				err = readErr
+			}
+			streamReads <- err
+		}()
+		streamWrites := make(chan error, 2)
+		for _, flow := range []struct {
+			conn    *quic.Conn
+			payload []byte
+		}{{clientConn, clientPayload}, {serverConn, serverPayload}} {
+			go func(conn *quic.Conn, payload []byte) {
+				stream, err := conn.OpenStreamSync(ctx)
+				if err == nil {
+					_, err = stream.Write(payload)
+				}
+				if err == nil {
+					err = stream.Close()
+				}
+				streamWrites <- err
+			}(flow.conn, flow.payload)
+		}
+		require.NoError(t, <-streamWrites)
+		require.NoError(t, <-streamWrites)
+		require.NoError(t, <-streamReads)
+		require.NoError(t, <-streamReads)
+
+		bulk := bytes.Repeat([]byte("b"), 512*1024)
+		bulkRead := make(chan error, 1)
+		go func() {
+			stream, err := serverConn.AcceptStream(ctx)
+			if err == nil {
+				data, readErr := io.ReadAll(stream)
+				if readErr == nil && !bytes.Equal(data, bulk) {
+					readErr = errors.New("unexpected post-interactive bulk payload")
+				}
+				err = readErr
+			}
+			bulkRead <- err
+		}()
+		stream, err := clientConn.OpenStreamSync(ctx)
+		require.NoError(t, err)
+		_, err = stream.Write(bulk)
+		require.NoError(t, err)
+		require.NoError(t, stream.Close())
+		require.NoError(t, <-bulkRead)
+
+		stopPump()
+		pumpStopped = true
+		synctest.Wait()
+		elapsed := time.Since(trafficStart)
+		forward := link.Counters(simnet.LinkForward)
+		reverse := link.Counters(simnet.LinkReverse)
+		require.Greater(t, elapsed, time.Duration(0))
+		require.Greater(t, forward.DeliveredBytes, uint64(len(bulk)), "forward interactive and bulk traffic must be delivered")
+		require.Greater(t, reverse.DeliveredBytes, uint64(len(serverPayload)), "reverse interactive and bidirectional traffic must be delivered")
+		forwardGoodput := uint64(float64((len(bulk)+datagrams*256)*8) / elapsed.Seconds())
+		reverseGoodput := uint64(float64((len(serverPayload)+datagrams*256)*8) / elapsed.Seconds())
+		t.Logf("interactive DATAGRAM/bidirectional/bulk: elapsed=%s forward_delivered_bytes=%d reverse_delivered_bytes=%d forward_goodput_bps=%d reverse_goodput_bps=%d", elapsed, forward.DeliveredBytes, reverse.DeliveredBytes, forwardGoodput, reverseGoodput)
+		clientInfo, ok := clientConn.AdaptiveBDPDebugInfo()
+		require.True(t, ok)
+		serverInfo, ok := serverConn.AdaptiveBDPDebugInfo()
+		require.True(t, ok)
+		require.Greater(t, clientInfo.PacingRateBytesPerSecond, uint64(0), "interactive traffic and bulk must not deadlock client pacing")
+		require.Greater(t, serverInfo.PacingRateBytesPerSecond, uint64(0), "interactive traffic and bidirectional streams must not deadlock server pacing")
+	})
+}
+
 func TestAdaptiveBDPDeterministicLinkMigrationUsesNewPath(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clientAddr1 := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 21), Port: 9021}
@@ -371,6 +545,245 @@ func TestAdaptiveBDPDeterministicLinkMigrationUsesNewPath(t *testing.T) {
 		stopPump()
 		pumpStopped = true
 	})
+}
+
+func TestAdaptiveBDPDeterministicLinkEqualRTTAdaptiveBDPFairness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		result := runAdaptiveBDPDeterministicCompetingFlows(t, quic.CongestionControlAdaptiveBDP, quic.CongestionControlAdaptiveBDP)
+		jain := jainFairness(result.rates)
+		t.Logf("equal-RTT AdaptiveBDP fairness: rates=%0.0f,%0.0f bps jain=%0.4f queue_delay_p95=%s tail_drops=%d", result.rates[0], result.rates[1], jain, result.queueDelayPercentile(95), result.forward.TailDrops)
+		require.GreaterOrEqual(t, jain, 0.90)
+		require.Zero(t, result.forward.TailDrops)
+	})
+}
+
+func TestAdaptiveBDPDeterministicLinkCompetesWithCubicAndReno(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		algorithm quic.CongestionControlAlgorithm
+	}{
+		{name: "Cubic", algorithm: quic.CongestionControlCubic},
+		{name: "Reno", algorithm: quic.CongestionControlReno},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				result := runAdaptiveBDPDeterministicCompetingFlows(t, quic.CongestionControlAdaptiveBDP, test.algorithm)
+				ratio := result.rates[0] / result.rates[1]
+				t.Logf("AdaptiveBDP vs %s: rates=%0.0f,%0.0f bps ratio=%0.4f queue_delay_p95=%s tail_drops=%d", test.name, result.rates[0], result.rates[1], ratio, result.queueDelayPercentile(95), result.forward.TailDrops)
+				require.GreaterOrEqual(t, ratio, 0.5)
+				require.LessOrEqual(t, ratio, 2.0)
+				require.Zero(t, result.forward.TailDrops)
+			})
+		})
+	}
+}
+
+func TestAdaptiveBDPDeterministicLinkUnequalRTTAdaptiveBDPFairness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client2Addr := "192.0.2.32:9032"
+		result := runAdaptiveBDPDeterministicCompetingFlowsWithAccessDelay(t, func(packet simnet.Packet) time.Duration {
+			if packet.From.String() == client2Addr || packet.To.String() == client2Addr {
+				return 90 * time.Millisecond
+			}
+			return 0
+		}, quic.CongestionControlAdaptiveBDP, quic.CongestionControlAdaptiveBDP)
+		jain := jainFairness(result.rates)
+		t.Logf("unequal-RTT AdaptiveBDP fairness (20ms,200ms): rates=%0.0f,%0.0f bps jain=%0.4f queue_delay_p95=%s tail_drops=%d", result.rates[0], result.rates[1], jain, result.queueDelayPercentile(95), result.forward.TailDrops)
+		require.Greater(t, result.rates[0], float64(0))
+		require.Greater(t, result.rates[1], float64(0))
+		require.Zero(t, result.forward.TailDrops)
+	})
+}
+
+func TestAdaptiveBDPDeterministicLinkLateStartAdaptiveBDPFairness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		result := runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 25*time.Millisecond, nil, []time.Duration{0, 500 * time.Millisecond}, 8*1024*1024, quic.CongestionControlAdaptiveBDP, quic.CongestionControlAdaptiveBDP)
+		jain := jainFairness(result.rates)
+		t.Logf("late-start AdaptiveBDP fairness: rates=%0.0f,%0.0f bps jain=%0.4f queue_delay_p95=%s tail_drops=%d", result.rates[0], result.rates[1], jain, result.queueDelayPercentile(95), result.forward.TailDrops)
+		require.True(t, result.firstFlowActiveAtSecondStart, "the second flow must start while the first transfer is still active")
+		require.Greater(t, result.rates[0], float64(0))
+		require.Greater(t, result.rates[1], float64(0))
+		require.Zero(t, result.forward.TailDrops)
+	})
+}
+
+func runAdaptiveBDPDeterministicCompetingFlows(t *testing.T, algorithms ...quic.CongestionControlAlgorithm) competingFlowsResult {
+	return runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 25*time.Millisecond, nil, nil, 1024*1024, algorithms...)
+}
+
+func runAdaptiveBDPDeterministicCompetingFlowsWithAccessDelay(t *testing.T, accessDelay simnet.PacketDelaySelector, algorithms ...quic.CongestionControlAlgorithm) competingFlowsResult {
+	return runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 10*time.Millisecond, accessDelay, nil, 1024*1024, algorithms...)
+}
+
+type competingFlowsResult struct {
+	rates                        []float64
+	firstFlowActiveAtSecondStart bool
+	forward                      simnet.LinkCounters
+	reverse                      simnet.LinkCounters
+	queueDelays                  []time.Duration
+}
+
+func (r competingFlowsResult) queueDelayPercentile(percentile int) time.Duration {
+	if len(r.queueDelays) == 0 {
+		return 0
+	}
+	samples := slices.Clone(r.queueDelays)
+	slices.Sort(samples)
+	return samples[(len(samples)-1)*percentile/100]
+}
+
+func runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t *testing.T, baseLatency time.Duration, accessDelay simnet.PacketDelaySelector, flowStartDelays []time.Duration, payloadBytes int, algorithms ...quic.CongestionControlAlgorithm) competingFlowsResult {
+	t.Helper()
+	require.Len(t, algorithms, 2)
+	if len(flowStartDelays) == 0 {
+		flowStartDelays = make([]time.Duration, len(algorithms))
+	}
+	require.Len(t, flowStartDelays, len(algorithms))
+	require.Greater(t, payloadBytes, 0)
+	clientAddrs := []*net.UDPAddr{{IP: net.IPv4(192, 0, 2, 31), Port: 9031}, {IP: net.IPv4(192, 0, 2, 32), Port: 9032}}
+	serverAddr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 33), Port: 9033}
+	// Keep the common bottleneck finite but above the observed competing-flow
+	// standing queue, so this fairness scenario measures controller sharing
+	// rather than scheduler-sensitive tail-drop recovery.
+	linkConfig := simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 30_000_000, BaseLatency: baseLatency, QueueLimitBytes: 1024 * 1024}
+	link := simnet.NewDeterministicLink(simnet.DeterministicLinkConfig{Forward: linkConfig, Reverse: linkConfig})
+	router := simnet.NewDeterministicRouterWithDelay(link, func(packet simnet.Packet) simnet.LinkDirection {
+		for _, addr := range clientAddrs {
+			if packet.From.String() == addr.String() {
+				return simnet.LinkForward
+			}
+		}
+		return simnet.LinkReverse
+	}, accessDelay)
+	clientPacketConns := []*simnet.SimConn{simnet.NewBufferedSimConn(clientAddrs[0], router, 4096), simnet.NewBufferedSimConn(clientAddrs[1], router, 4096)}
+	serverPacketConn := simnet.NewBufferedSimConn(serverAddr, router, 4096)
+	defer clientPacketConns[0].Close()
+	defer clientPacketConns[1].Close()
+	defer serverPacketConn.Close()
+	stopPump, queueDelays := startDeterministicLinkPump(router)
+	pumpStopped := false
+	defer func() {
+		if !pumpStopped {
+			stopPump()
+		}
+	}()
+	serverConfig := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{Enable: true, Algorithm: quic.CongestionControlAdaptiveBDP, StartupTargetRateBps: 30_000_000}})
+	ln, err := quic.Listen(serverPacketConn, getTLSConfig(), serverConfig)
+	require.NoError(t, err)
+	defer ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	clients := make([]*quic.Conn, len(clientPacketConns))
+	for i, packetConn := range clientPacketConns {
+		clientConfig := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{Enable: true, Algorithm: algorithms[i], StartupTargetRateBps: 30_000_000}})
+		clients[i], err = quic.Dial(ctx, packetConn, serverAddr, getTLSClientConfig(), clientConfig)
+		require.NoError(t, err)
+		defer clients[i].CloseWithError(0, "")
+	}
+	servers := make([]*quic.Conn, len(clients))
+	for i := range servers {
+		servers[i], err = ln.Accept(ctx)
+		require.NoError(t, err)
+		defer servers[i].CloseWithError(0, "")
+	}
+	payload := bytes.Repeat([]byte("f"), payloadBytes)
+	type flowResult struct {
+		index   int
+		elapsed time.Duration
+		err     error
+	}
+	reads := make(chan flowResult, len(servers))
+	firstReadDone := make(chan struct{})
+	start := time.Now()
+	for index, server := range servers {
+		go func(index int, server *quic.Conn) {
+			stream, err := server.AcceptStream(ctx)
+			if err == nil {
+				data, readErr := io.ReadAll(stream)
+				if readErr == nil && !bytes.Equal(data, payload) {
+					readErr = errors.New("unexpected fairness payload")
+				}
+				err = readErr
+			}
+			reads <- flowResult{index: index, elapsed: time.Since(start), err: err}
+			if index == 0 {
+				close(firstReadDone)
+			}
+		}(index, server)
+	}
+	type writeResult struct {
+		index       int
+		started     time.Duration
+		firstActive bool
+		err         error
+	}
+	writes := make(chan writeResult, len(clients))
+	for index, client := range clients {
+		go func(index int, client *quic.Conn) {
+			if delay := flowStartDelays[index]; delay > 0 {
+				<-time.After(delay)
+			}
+			firstActive := true
+			if index == 1 {
+				select {
+				case <-firstReadDone:
+					firstActive = false
+				default:
+				}
+			}
+			started := time.Since(start)
+			stream, err := client.OpenStreamSync(ctx)
+			if err == nil {
+				_, err = stream.Write(payload)
+			}
+			if err == nil {
+				err = stream.Close()
+			}
+			if !firstActive && err == nil {
+				err = errors.New("first flow completed before late-start flow began")
+			}
+			writes <- writeResult{index: index, started: started, firstActive: firstActive, err: err}
+		}(index, client)
+	}
+	writeStarts := make([]time.Duration, len(clients))
+	firstFlowActiveAtSecondStart := true
+	for range clients {
+		result := <-writes
+		require.NoError(t, result.err)
+		writeStarts[result.index] = result.started
+		if result.index == 1 {
+			firstFlowActiveAtSecondStart = result.firstActive
+		}
+	}
+	rates := make([]float64, len(clients))
+	for range rates {
+		result := <-reads
+		require.NoError(t, result.err)
+		elapsed := result.elapsed - writeStarts[result.index]
+		require.Greater(t, elapsed, time.Duration(0))
+		rates[result.index] = float64(len(payload)*8) / elapsed.Seconds()
+	}
+	stopPump()
+	pumpStopped = true
+	return competingFlowsResult{
+		rates:                        rates,
+		firstFlowActiveAtSecondStart: firstFlowActiveAtSecondStart,
+		forward:                      link.Counters(simnet.LinkForward),
+		reverse:                      link.Counters(simnet.LinkReverse),
+		queueDelays:                  queueDelays(),
+	}
+}
+
+func jainFairness(rates []float64) float64 {
+	var sum, sumSquares float64
+	for _, rate := range rates {
+		sum += rate
+		sumSquares += rate * rate
+	}
+	if sumSquares == 0 {
+		return 0
+	}
+	return sum * sum / (float64(len(rates)) * sumSquares)
 }
 
 func TestAdaptiveBDPDeterministicLinkT03RebasesBaseRTT(t *testing.T) {
@@ -487,6 +900,7 @@ func TestAdaptiveBDPDeterministicLinkT01CapacityDownshift(t *testing.T) {
 			},
 		})
 		require.Greater(t, result.goodputBitsPerSecond(), uint64(0))
+		require.Less(t, result.info.PacingRateBytesPerSecond, uint64(15_000_000/8), "T01 must not remain pinned to the stale 100 Mbit/s startup floor")
 		require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0))
 	})
 }

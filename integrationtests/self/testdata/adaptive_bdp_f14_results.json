@@ -15,6 +15,16 @@
       "bandwidth_bytes_per_second": 1253877
     },
     {
+      "scenario": "C01",
+      "capacity_bits_per_second": 1000000,
+      "base_rtt": "20ms",
+      "queue": "1 BDP",
+      "transfer_goodput_bits_per_second": 232032,
+      "tail_drops": 169,
+      "queue_delay_p95": "10.24ms",
+      "acceptance_note": "This short transfer does not meet the 90% clean-path utilization target."
+    },
+    {
       "scenario": "T03",
       "elapsed": "2.6585s",
       "delivered_bytes": 4296402,
@@ -84,6 +94,74 @@
       "pacing_bytes_per_second_range": [802781, 804387]
     },
     {
+      "scenario": "two_adaptive_bdp_equal_rtt",
+      "flow_goodput_bits_per_second_range": [13235418, 13469184],
+      "jain_fairness_min": 0.9999,
+      "queue_delay_p95": "96.256ms",
+      "tail_drops": 0,
+      "acceptance_jain_minimum": 0.9
+    },
+    {
+      "scenario": "adaptive_bdp_vs_cubic_equal_rtt",
+      "adaptive_bdp_goodput_bits_per_second": 12087331,
+      "cubic_goodput_bits_per_second": 17001638,
+      "adaptive_bdp_to_cubic_ratio": 0.7110,
+      "queue_delay_p95": "115.719734ms",
+      "tail_drops": 0,
+      "asserted_ratio_range": [0.5, 2.0],
+      "repeated_test_invocations": 10
+    },
+    {
+      "scenario": "adaptive_bdp_vs_reno_equal_rtt",
+      "adaptive_bdp_goodput_bits_per_second": 11949584,
+      "reno_goodput_bits_per_second": 17228605,
+      "adaptive_bdp_to_reno_ratio": 0.6936,
+      "queue_delay_p95": "134.151734ms",
+      "tail_drops": 0,
+      "asserted_ratio_range": [0.5, 2.0],
+      "repeated_test_invocations": 10
+    },
+    {
+      "scenario": "two_adaptive_bdp_unequal_rtt",
+      "rtt_milliseconds": [20, 200],
+      "flow_goodput_bits_per_second": [25819046, 7908558],
+      "jain_fairness": 0.7800,
+      "queue_delay_p95": "19.8056ms",
+      "tail_drops": 0,
+      "progress_asserted": true,
+      "repeated_test_invocations": 10,
+      "acceptance_note": "No unequal-RTT fairness threshold is defined yet; queue and loss telemetry are pending."
+    },
+    {
+      "scenario": "two_adaptive_bdp_late_start",
+      "late_start_delay": "500ms",
+      "payload_bytes_per_flow": 8388608,
+      "first_flow_active_when_late_flow_started": true,
+      "established_flow_goodput_bits_per_second_range": [14721376, 15773990],
+      "late_flow_goodput_bits_per_second_range": [15875113, 15899184],
+      "jain_fairness_range": [0.9985, 1.0],
+      "queue_delay_p95": "57.002667ms",
+      "tail_drops": 0,
+      "repeated_test_invocations": 10,
+      "acceptance_note": "Both flows are asserted to make progress; an unequal-RTT/late-start performance acceptance target is pending."
+    },
+    {
+      "scenario": "interactive_datagram_bidirectional_bulk",
+      "interactive_datagrams_per_direction": 100,
+      "interactive_datagram_bytes": 256,
+      "interactive_interval": "100ms",
+      "virtual_elapsed_range": ["10.557s", "10.6821s"],
+      "forward_delivered_bytes_range": [656329, 656376],
+      "reverse_delivered_bytes_range": [122115, 122225],
+      "forward_goodput_bits_per_second_range": [411820, 416700],
+      "reverse_goodput_bits_per_second_range": [80523, 81477],
+      "bidirectional_stream_payload_bytes": [81920, 81920],
+      "post_interactive_bulk_payload_bytes": 524288,
+      "non_zero_pacing_asserted": true,
+      "repeated_test_invocations": 3,
+      "acceptance_note": "Payload delivery is asserted; queue-percentile and performance acceptance gates are pending."
+    },
+    {
       "scenario": "T05",
       "elapsed": "19.0109s",
       "delivered_bytes": 1082121,
@@ -93,6 +171,16 @@
       "cwnd_bytes": 5120,
       "pacing_bytes_per_second": 6250000,
       "bandwidth_bytes_per_second": 249937
+    },
+    {
+      "scenario": "T02",
+      "initial_path": "10 Mbit/s / 30ms",
+      "changed_path": "100 Mbit/s / 30ms",
+      "change_time": "200ms",
+      "transfer_goodput_bits_per_second": 20603237,
+      "queue_delay_p95": "21.504ms",
+      "tail_drops": 0,
+      "acceptance_note": "Transfer-wide goodput is not a time-bounded proof of the 80 Mbit/s within-15-RTT target."
     },
     {
       "scenario": "Q02",

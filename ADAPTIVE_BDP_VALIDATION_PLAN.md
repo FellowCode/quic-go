@@ -174,7 +174,7 @@ scenario is **not** a production-readiness claim.
 
 | Area | Status | Notes |
 |---|---|---|
-| C01–C05 | `[~]` | Real upload runs exist. Convergence utilization and clean-path p95 gates are pending. |
+| C01–C05 | `[~]` | Real upload runs exist. Convergence utilization and clean-path p95 gates are pending; the current C01 short transfer measured only 232,032 bit/s and 169 tail drops on the 1 Mbit/s / 1-BDP path, so it is not a clean-path acceptance pass. |
 | C06 | `[~]` | Default and enlarged cwnd configurations run, but the current transfer is not a saturated default-ceiling demonstration. |
 | L01–L03 | `[~]` | Fixed-seed independent-loss runs exist with no tail-drop pressure; comparative no-queue-versus-queued-loss gate is pending. |
 | L04 | `[~]` | Exact 10-packet deterministic burst is exercised once; the plan's every-5-second repetition is pending. |
@@ -184,20 +184,20 @@ scenario is **not** a production-readiness claim.
 | Q03 | `[~]` | Reverse ACK-queue occupancy is exercised; full queue/state telemetry gate is pending. |
 | Q04 | `[ ]` | Link marks ECN, but deterministic SimConn cannot deliver CE marks through the real QUIC ACK_ECN transport path. |
 | Q05 | `[~]` | Complete outage/recovery is exercised; persistent-congestion model-reset proof is pending. |
-| T01 | `[~]` | Executed, but currently fails the documented downshift target: observed final pacing was 50 Mbit/s, not below 15 Mbit/s. |
-| T02 | `[~]` | Executed; capacity-increase recovery target is pending. |
+| T01 | `[~]` | Final pacing is asserted below 15 Mbit/s after the downshift. The required within-three-RTT measurement is still pending. |
+| T02 | `[~]` | Executed; current transfer-wide goodput is 20.603 Mbit/s, which is not evidence for the required 80 Mbit/s within 15 RTTs. A time-bounded post-change measurement remains pending. |
 | T03, T05 | `[x]` | Same-5-tuple upward min-RTT rebase is asserted. |
 | T04, T06 | `[x]` | Lower same-5-tuple base RTT is asserted (min RTT <= 50 ms). |
 | Idle download → upload | `[x]` | Real direction switch after virtual idle verifies payload and non-zero pacing. |
 | Explicit migration | `[~]` | Real AddPath/Probe/Switch/new-path traffic is exercised; controller-reset evidence is pending. |
-| Competing flows / fairness | `[ ]` | AdaptiveBDP/Cubic/Reno competition and Jain fairness are not implemented. |
-| Bidirectional/DATAGRAM/interactive bursts | `[ ]` | Remaining traffic-pattern coverage is not implemented. |
+| Competing flows / fairness | `[~]` | Equal-RTT AdaptiveBDP versus AdaptiveBDP has a Jain >= 0.90 assertion. Equal-RTT AdaptiveBDP versus Cubic and Reno each assert a sustained ratio in [0.5, 2.0]. 20/200 ms unequal-RTT and 500 ms late-start runs verify progress. All competing scenarios record aggregate forward p95 queue delay and assert zero tail drops; unequal-RTT and late-start acceptance targets remain undefined. |
+| Bidirectional/DATAGRAM/interactive bursts | `[~]` | Real QUIC coverage sends 100 bidirectional DATAGRAMs over 10 virtual seconds, then bidirectional streams and a post-interactive bulk upload. Performance and queue-percentile acceptance gates remain pending. |
 | JSON / Markdown results | `[~]` | Artifacts exist, but do not yet contain the complete matrix. |
 | Per-round telemetry and strict numeric gates | `[ ]` | Queue percentiles exist; per-round controller time series, recovery RTTs, and full cwnd/pacing/BW bounds remain pending. |
 
-Current F14 result: **BLOCKED**. In addition to incomplete coverage, T01 is
-an observed performance-acceptance failure. Do not start F15 or claim
-production readiness from this status table.
+Current F14 result: **BLOCKED** because coverage and per-round acceptance
+evidence remain incomplete. Do not start F15 or claim production readiness
+from this status table.
 
 ## Correctness Gates
 

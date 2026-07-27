@@ -171,6 +171,10 @@ type adaptiveBDPSender struct {
 	bw      uint64
 	maxBw   uint64
 	shortBw uint64
+	// shortBwCongestionConfirmed records that shortBw came from queue, ECN,
+	// or material-loss evidence. A stale startup-target floor must not undo
+	// this proven capacity decrease after the queue has drained.
+	shortBwCongestionConfirmed bool
 
 	bwFilter bandwidthMaxFilter
 
@@ -181,6 +185,10 @@ type adaptiveBDPSender struct {
 	fullBw        uint64
 	fullBwCount   uint32
 	fullBwReached bool
+	// startupTargetRateValidated becomes true only after saturated traffic has
+	// actually reached the configured startup target. It lets a later aged-out
+	// estimate revoke that startup-only floor on a degraded path.
+	startupTargetRateValidated bool
 
 	queueHighRounds uint32
 	downshiftRounds uint32
@@ -525,6 +533,7 @@ func (s *adaptiveBDPSender) resetCapacityModelAfterPersistentCongestion(eventTim
 	s.bw = 0
 	s.maxBw = 0
 	s.shortBw = 0
+	s.shortBwCongestionConfirmed = false
 	s.bwFilter.samples = s.bwFilter.samples[:0]
 
 	s.nextRoundDelivered = 0
@@ -533,6 +542,7 @@ func (s *adaptiveBDPSender) resetCapacityModelAfterPersistentCongestion(eventTim
 	s.fullBw = 0
 	s.fullBwCount = 0
 	s.fullBwReached = false
+	s.startupTargetRateValidated = false
 
 	s.queueHighRounds = 0
 	s.downshiftRounds = 0
@@ -967,6 +977,9 @@ func (s *adaptiveBDPSender) updateBandwidthAt(sample RateSample, priorInFlight p
 	}
 
 	sampleBW := uint64(sample.DeliveryRate)
+	if !sample.AppLimited && s.cfg.StartupTargetRateBps > 0 && sampleBW >= s.configuredStartupTargetRateFloor() {
+		s.startupTargetRateValidated = true
+	}
 	prevMaxBw := s.maxBw
 	prevShortBw := s.shortBw
 	prevBw := s.bw
@@ -1298,6 +1311,7 @@ func (s *adaptiveBDPSender) confirmedCongestionDownshift(sampleBW uint64, eventT
 	} else {
 		s.shortBw = min(s.shortBw, newBW)
 	}
+	s.shortBwCongestionConfirmed = true
 	s.enterStateWithReason(adaptiveBDPProbeDown, eventTime, "short_bw_downshift_with_congestion_evidence")
 	s.lastBWChangeReason = "short_bw_downshift_with_congestion_evidence"
 }
@@ -1610,11 +1624,7 @@ func (s *adaptiveBDPSender) noCongestionRateFloorBytesPerSecond() uint64 {
 	if s.cfg.StartupTargetRateBps == 0 {
 		return 0
 	}
-	fraction := s.cfg.NoCongestionRateFloorFraction
-	if fraction <= 0 {
-		fraction = 0.5
-	}
-	return uint64((float64(s.cfg.StartupTargetRateBps) / 8.0) * clampFloat(fraction, 0, 1))
+	return s.startupTargetRateFloor()
 }
 
 func (s *adaptiveBDPSender) noCongestionCwndFloor() protocol.ByteCount {
@@ -1625,11 +1635,7 @@ func (s *adaptiveBDPSender) noCongestionCwndFloor() protocol.ByteCount {
 	if s.cfg.MinProbeRateBps > 0 {
 		rateFloor = s.cfg.MinProbeRateBps / 8
 	} else if s.cfg.StartupTargetRateBps > 0 {
-		fraction := s.cfg.NoCongestionRateFloorFraction
-		if fraction <= 0 {
-			fraction = 0.5
-		}
-		rateFloor = uint64((float64(s.cfg.StartupTargetRateBps) / 8.0) * clampFloat(fraction, 0, 1))
+		rateFloor = s.startupTargetRateFloor()
 	}
 	if rateFloor == 0 {
 		return 0
@@ -1639,6 +1645,25 @@ func (s *adaptiveBDPSender) noCongestionCwndFloor() protocol.ByteCount {
 		return 0
 	}
 	return max(s.minCongestionWindow, roundUpToMSS(floor, s.maxDatagramSize))
+}
+
+func (s *adaptiveBDPSender) startupTargetRateFloor() uint64 {
+	floor := s.configuredStartupTargetRateFloor()
+	if s.shortBwCongestionConfirmed && s.shortBw > 0 {
+		return min(floor, s.shortBw)
+	}
+	if s.startupTargetRateValidated && s.maxBw > 0 {
+		return min(floor, s.maxBw)
+	}
+	return floor
+}
+
+func (s *adaptiveBDPSender) configuredStartupTargetRateFloor() uint64 {
+	fraction := s.cfg.NoCongestionRateFloorFraction
+	if fraction <= 0 {
+		fraction = 0.5
+	}
+	return uint64((float64(s.cfg.StartupTargetRateBps) / 8.0) * clampFloat(fraction, 0, 1))
 }
 
 func (s *adaptiveBDPSender) bdpForBandwidth(bw uint64) protocol.ByteCount {
