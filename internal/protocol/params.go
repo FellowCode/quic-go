@@ -14,6 +14,13 @@ const InitialPacketSize = 1280
 // MaxCongestionWindowPackets is the maximum congestion window in packet.
 const MaxCongestionWindowPackets = 10000
 
+// MaxAdaptiveBDPWindowPackets is the hard maximum AdaptiveBDP congestion
+// window. It allows 200,000 outstanding and 250,000 tracked packet records.
+// On 64-bit platforms, the packet record and its history pointer are currently
+// 120 bytes; the 128-byte accounting budget therefore bounds this bookkeeping
+// to about 32,000,000 bytes (30.5 MiB) per connection, excluding frame data.
+const MaxAdaptiveBDPWindowPackets uint32 = 100_000
+
 // MaxUndecryptablePackets limits the number of undecryptable packets that are queued in the connection.
 const MaxUndecryptablePackets = 32
 

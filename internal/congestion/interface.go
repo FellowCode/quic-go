@@ -77,6 +77,7 @@ type CwndTuningConfig struct {
 	DownshiftRatio        float64
 
 	NoCongestionRateFloorFraction float64
+	DisableNoCongestionRateFloor  bool
 	NoCongestionDownshiftRounds   uint32
 	NoCongestionDownshiftFactor   float64
 	UploadWarmupDuration          time.Duration

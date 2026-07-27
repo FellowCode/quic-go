@@ -219,6 +219,7 @@ func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
 		UploadWarmupBytes:                512 * 1024,
 		MinDownshiftSampleBytes:          128 * 1024,
 		CongestionDownshiftRounds:        3,
+		DisableNoCongestionRateFloor:     true,
 	})
 
 	require.Equal(t, congestion.CongestionControlAdaptiveBDP, cfg.Algorithm)
@@ -245,6 +246,7 @@ func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
 	require.Equal(t, uint64(512*1024), cfg.UploadWarmupBytes)
 	require.Equal(t, uint64(128*1024), cfg.MinDownshiftSampleBytes)
 	require.Equal(t, uint32(3), cfg.CongestionDownshiftRounds)
+	require.True(t, cfg.DisableNoCongestionRateFloor)
 }
 
 type testConnectionOpt func(*Conn)

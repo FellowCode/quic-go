@@ -169,21 +169,25 @@ func testMITMCorruptPackets(t *testing.T, direction quicproxy.Direction) {
 	rtt := scaleDuration(5 * time.Millisecond)
 
 	var numCorrupted atomic.Int32
+	rng := mrand.New(mrand.NewPCG(0, 0))
+	var rngMutex sync.Mutex
 	dropCallback := func(dir quicproxy.Direction, _, _ net.Addr, b []byte) bool {
 		if dir != direction {
 			return false
 		}
+		rngMutex.Lock()
+		defer rngMutex.Unlock()
 		isLongHeaderPacket := wire.IsLongHeaderPacket(b[0])
-		// corrupt 20% of long header packets and 5% of short header packets
-		if isLongHeaderPacket && mrand.IntN(4) != 0 {
+		// Corrupt 25% of long header packets and 5% of short header packets.
+		if isLongHeaderPacket && rng.IntN(4) != 0 {
 			return false
 		}
-		if !isLongHeaderPacket && mrand.IntN(20) != 0 {
+		if !isLongHeaderPacket && rng.IntN(20) != 0 {
 			return false
 		}
 		numCorrupted.Add(1)
-		pos := mrand.IntN(len(b))
-		b[pos] = byte(mrand.IntN(256))
+		pos := rng.IntN(len(b))
+		b[pos] = byte(rng.IntN(256))
 		switch direction {
 		case quicproxy.DirectionIncoming:
 			clientTransport.WriteTo(b, serverTransport.Conn.LocalAddr())

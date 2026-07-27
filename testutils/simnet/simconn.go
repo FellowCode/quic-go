@@ -63,21 +63,31 @@ var _ net.PacketConn = &SimConn{}
 // NewSimConn creates a new simulated connection that drops packets if the
 // receive buffer is full.
 func NewSimConn(addr *net.UDPAddr, rtr Router) *SimConn {
-	return newSimConn(addr, rtr, false)
+	return newSimConn(addr, rtr, false, 32)
 }
 
 // NewBlockingSimConn creates a new simulated connection that blocks if the
 // receive buffer is full. Does not drop packets.
 func NewBlockingSimConn(addr *net.UDPAddr, rtr Router) *SimConn {
-	return newSimConn(addr, rtr, true)
+	return newSimConn(addr, rtr, true, 32)
 }
 
-func newSimConn(addr *net.UDPAddr, rtr Router, block bool) *SimConn {
+// NewBufferedSimConn creates a non-blocking simulated UDP endpoint with an
+// explicit receive queue. Deterministic-link tests use this to ensure that
+// router delivery batches do not introduce scheduler-dependent local drops.
+func NewBufferedSimConn(addr *net.UDPAddr, rtr Router, receiveBuffer int) *SimConn {
+	if receiveBuffer <= 0 {
+		panic("simnet: receive buffer must be positive")
+	}
+	return newSimConn(addr, rtr, false, receiveBuffer)
+}
+
+func newSimConn(addr *net.UDPAddr, rtr Router, block bool, receiveBuffer int) *SimConn {
 	c := &SimConn{
 		recvBackPressure: block,
 		router:           rtr,
 		myAddr:           addr,
-		packetsToRead:    make(chan Packet, 32),
+		packetsToRead:    make(chan Packet, receiveBuffer),
 		closedChan:       make(chan struct{}),
 		deadlineUpdated:  make(chan struct{}, 1),
 	}
