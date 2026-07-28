@@ -26,7 +26,7 @@ func TestDeterministicLinkShapesDirectionsAndAccountsQueue(t *testing.T) {
 	delivered := link.AdvanceTo(6 * time.Millisecond)
 	require.Len(t, delivered, 1)
 	require.Equal(t, "a", string(delivered[0].Packet.Data))
-	require.Equal(t, uint64(2), link.QueueBytes(LinkForward))
+	require.Zero(t, link.QueueBytes(LinkForward), "all three packets have left the serializer even though two are still propagating")
 
 	require.True(t, sendAccepted(t, link, LinkReverse, testPacket("r")))
 	require.Len(t, link.AdvanceTo(7*time.Millisecond), 1, "the forward queue remains independently shaped")
@@ -71,12 +71,13 @@ func TestDeterministicLinkLossECNReorderingDuplicationAndChanges(t *testing.T) {
 	require.Equal(t, "a", string(delivered[0].Packet.Data))
 	require.Equal(t, "c", string(delivered[1].Packet.Data), "reorder delay lets the later packet overtake b")
 	require.Equal(t, "c", string(delivered[2].Packet.Data))
-	require.True(t, delivered[1].ECNMarked)
+	require.False(t, delivered[1].ECNMarked, "the serializer queue drained before c was submitted")
 	require.True(t, delivered[2].Duplicate)
 	require.Equal(t, "b", string(delivered[3].Packet.Data))
+	require.True(t, delivered[3].ECNMarked)
 	counters := link.Counters(LinkForward)
 	require.Equal(t, uint64(1), counters.ScriptedLosses)
-	require.Equal(t, uint64(2), counters.ECNMarks)
+	require.Equal(t, uint64(1), counters.ECNMarks)
 	require.Equal(t, uint64(1), counters.Reordered)
 	require.Equal(t, uint64(1), counters.Duplicates)
 	require.Zero(t, link.QueueBytes(LinkForward))
@@ -97,6 +98,17 @@ func TestDeterministicLinkRandomLossUsesFixedSeed(t *testing.T) {
 	}
 	require.Equal(t, first.Counters(LinkForward), second.Counters(LinkForward))
 	require.Greater(t, first.Counters(LinkForward).RandomLosses, uint64(0))
+}
+
+func TestDeterministicLinkMeasuresAndResetsSameTimeBurst(t *testing.T) {
+	link := NewDeterministicLink(DeterministicLinkConfig{})
+	require.True(t, sendAccepted(t, link, LinkForward, testPacket("abc")))
+	require.True(t, sendAccepted(t, link, LinkForward, testPacket("de")))
+	require.Equal(t, uint64(5), link.Counters(LinkForward).PeakSameTimeSubmittedBytes)
+	link.ResetBurstPeak(LinkForward)
+	require.Zero(t, link.Counters(LinkForward).PeakSameTimeSubmittedBytes)
+	require.True(t, sendAccepted(t, link, LinkForward, testPacket("x")))
+	require.Equal(t, uint64(1), link.Counters(LinkForward).PeakSameTimeSubmittedBytes)
 }
 
 func TestDeterministicLinkGilbertElliottLossUsesFixedSeed(t *testing.T) {

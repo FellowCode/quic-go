@@ -52,6 +52,18 @@ type OOBCapablePacketConn interface {
 
 var _ OOBCapablePacketConn = &net.UDPConn{}
 
+// ecnCapablePacketConn is a PacketConn implementation that transports the
+// two IP ECN header bits without relying on operating-system ancillary data.
+// It is primarily useful for deterministic in-process network adapters.
+//
+// ECN values use the IP header encoding: Not-ECT=0, ECT(1)=1, ECT(0)=2 and
+// CE=3.
+type ecnCapablePacketConn interface {
+	net.PacketConn
+	ReadFromWithECN([]byte) (n int, addr net.Addr, ecnBits uint8, err error)
+	WriteToWithECN([]byte, net.Addr, uint8) (int, error)
+}
+
 func wrapConn(pc net.PacketConn) (rawConn, error) {
 	if err := setReceiveBuffer(pc); err != nil {
 		if !strings.Contains(err.Error(), "use of closed network connection") {
@@ -93,12 +105,52 @@ func wrapConn(pc net.PacketConn) (rawConn, error) {
 			}
 		}
 	}
+	if c, ok := pc.(ecnCapablePacketConn); ok {
+		return &packetConnWithECN{ecnCapablePacketConn: c, supportsDF: supportsDF}, nil
+	}
 	c, ok := pc.(OOBCapablePacketConn)
 	if !ok {
 		utils.DefaultLogger.Infof("PacketConn is not a net.UDPConn. Disabling optimizations possible on UDP connections.")
 		return &basicConn{PacketConn: pc, supportsDF: supportsDF}, nil
 	}
 	return newConn(c, supportsDF)
+}
+
+type packetConnWithECN struct {
+	ecnCapablePacketConn
+	supportsDF bool
+}
+
+var _ rawConn = &packetConnWithECN{}
+
+func (c *packetConnWithECN) ReadPacket() (receivedPacket, error) {
+	buffer := getPacketBuffer()
+	buffer.Data = buffer.Data[:protocol.MaxPacketBufferSize]
+	n, addr, ecnBits, err := c.ReadFromWithECN(buffer.Data)
+	if err != nil {
+		return receivedPacket{}, err
+	}
+	return receivedPacket{
+		remoteAddr: addr,
+		rcvTime:    monotime.Now(),
+		data:       buffer.Data[:n],
+		buffer:     buffer,
+		ecn:        protocol.ParseECNHeaderBits(byte(ecnBits)),
+	}, nil
+}
+
+func (c *packetConnWithECN) WritePacket(b []byte, addr net.Addr, _ []byte, gsoSize uint16, ecn protocol.ECN) (int, error) {
+	if gsoSize != 0 {
+		panic("cannot use GSO with an ECN-capable PacketConn")
+	}
+	if ecn == protocol.ECNUnsupported {
+		return c.WriteTo(b, addr)
+	}
+	return c.WriteToWithECN(b, addr, uint8(ecn.ToHeaderBits()))
+}
+
+func (c *packetConnWithECN) capabilities() connCapabilities {
+	return connCapabilities{DF: c.supportsDF, ECN: true}
 }
 
 // The basicConn is the most trivial implementation of a rawConn.

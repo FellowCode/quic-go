@@ -92,6 +92,14 @@ type sentPacketHandler struct {
 	deliveredTime  monotime.Time
 	firstSentTime  monotime.Time
 
+	persistentCongestionStart    monotime.Time
+	persistentCongestionEnd      monotime.Time
+	persistentCongestionPTO      time.Duration
+	persistentCongestionReported bool
+	persistentCongestionEvents   uint64
+	lastPersistentCongestionSpan time.Duration
+	lastPersistentCongestionGate time.Duration
+
 	congestion congestion.SendAlgorithmWithDebugInfos
 	rttStats   *utils.RTTStats
 	connStats  *utils.ConnectionStats
@@ -465,6 +473,7 @@ func (h *sentPacketHandler) getPacketNumberSpace(encLevel protocol.EncryptionLev
 
 func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.EncryptionLevel, rcvTime monotime.Time) (bool /* contained 1-RTT packet */, error) {
 	pnSpace := h.getPacketNumberSpace(encLevel)
+	persistentCongestionPTO := h.rttStats.PTO(encLevel == protocol.Encryption1RTT)
 
 	largestAcked := ack.LargestAcked()
 	if largestAcked > pnSpace.largestSent {
@@ -523,7 +532,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 
 	pnSpace.largestAcked = max(pnSpace.largestAcked, largestAcked)
 
-	h.detectLostPackets(rcvTime, encLevel)
+	h.detectLostPackets(rcvTime, encLevel, persistentCongestionPTO)
 	if encLevel == protocol.Encryption1RTT {
 		h.detectLostPathProbes(rcvTime)
 	}
@@ -573,6 +582,10 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		if !p.isPathProbePacket {
 			putPacket(p.packet)
 		}
+	}
+	if sawAckedInFlight && !h.persistentCongestionStart.IsZero() &&
+		!newestAckedSendTime.Before(h.persistentCongestionStart) {
+		h.resetPersistentCongestionInterval()
 	}
 	if sawAckedInFlight {
 		h.firstSentTime = newestAckedSendTime
@@ -999,7 +1012,7 @@ func (h *sentPacketHandler) detectLostPathProbes(now monotime.Time) {
 	}
 }
 
-func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protocol.EncryptionLevel) {
+func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protocol.EncryptionLevel, persistentCongestionPTO time.Duration) {
 	pnSpace := h.getPacketNumberSpace(encLevel)
 	pnSpace.lossTime = 0
 
@@ -1013,8 +1026,6 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 	lostSendTime := now.Add(-lossDelay)
 
 	priorInFlight := h.bytesInFlight
-	var firstLostAckElicitingTime monotime.Time
-	var lastLostAckElicitingTime monotime.Time
 	for pn, p := range pnSpace.history.Packets() {
 		if pn > pnSpace.largestAcked {
 			break
@@ -1067,10 +1078,9 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 			}
 			pnSpace.history.DeclareLost(pn)
 			if !p.isPathProbePacket && p.IsAckEliciting() {
-				if firstLostAckElicitingTime.IsZero() {
-					firstLostAckElicitingTime = p.SendTime
+				if encLevel == protocol.Encryption1RTT {
+					h.notePersistentCongestionLoss(p.SendTime, persistentCongestionPTO)
 				}
-				lastLostAckElicitingTime = p.SendTime
 				// the bytes in flight need to be reduced no matter if the frames in this packet will be retransmitted
 				h.removeFromBytesInFlight(p)
 				h.queueFramesForRetransmission(p)
@@ -1083,13 +1093,52 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 			}
 		}
 	}
-	if !firstLostAckElicitingTime.IsZero() && lastLostAckElicitingTime.Sub(firstLostAckElicitingTime) >= 3*h.rttStats.PTO(encLevel == protocol.Encryption1RTT) {
-		if congWithPersistentCongestion, ok := h.congestion.(congestion.SendAlgorithmWithPersistentCongestion); ok {
-			congWithPersistentCongestion.OnPersistentCongestion(now)
-		} else {
-			h.congestion.OnRetransmissionTimeout(true)
+	if encLevel == protocol.Encryption1RTT {
+		h.maybeReportPersistentCongestion(now)
+	}
+}
+
+func (h *sentPacketHandler) notePersistentCongestionLoss(sentTime monotime.Time, pto time.Duration) {
+	if h.persistentCongestionStart.IsZero() || sentTime.Before(h.persistentCongestionStart) {
+		h.persistentCongestionStart = sentTime
+	}
+	if h.persistentCongestionEnd.IsZero() || sentTime.After(h.persistentCongestionEnd) {
+		h.persistentCongestionEnd = sentTime
+	}
+	if pto > 0 && (h.persistentCongestionPTO == 0 || pto < h.persistentCongestionPTO) {
+		h.persistentCongestionPTO = pto
+	}
+}
+
+func (h *sentPacketHandler) maybeReportPersistentCongestion(now monotime.Time) {
+	if h.persistentCongestionReported || h.persistentCongestionStart.IsZero() ||
+		h.persistentCongestionPTO <= 0 ||
+		h.persistentCongestionEnd.Sub(h.persistentCongestionStart) < 3*h.persistentCongestionPTO {
+		return
+	}
+	h.persistentCongestionReported = true
+	h.persistentCongestionEvents++
+	h.lastPersistentCongestionSpan = h.persistentCongestionEnd.Sub(h.persistentCongestionStart)
+	h.lastPersistentCongestionGate = 3 * h.persistentCongestionPTO
+	if congWithPersistentCongestion, ok := h.congestion.(congestion.SendAlgorithmWithPersistentCongestion); ok {
+		congWithPersistentCongestion.OnPersistentCongestion(now)
+	} else {
+		h.congestion.OnRetransmissionTimeout(true)
+	}
+}
+
+func (h *sentPacketHandler) resetPersistentCongestionInterval() {
+	if !h.persistentCongestionStart.IsZero() {
+		span := h.persistentCongestionEnd.Sub(h.persistentCongestionStart)
+		if span > h.lastPersistentCongestionSpan {
+			h.lastPersistentCongestionSpan = span
+			h.lastPersistentCongestionGate = 3 * h.persistentCongestionPTO
 		}
 	}
+	h.persistentCongestionStart = 0
+	h.persistentCongestionEnd = 0
+	h.persistentCongestionPTO = 0
+	h.persistentCongestionReported = false
 }
 
 func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
@@ -1112,7 +1161,7 @@ func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
 			})
 		}
 		// Early retransmit or time loss detection
-		h.detectLostPackets(now, encLevel)
+		h.detectLostPackets(now, encLevel, h.rttStats.PTO(encLevel == protocol.Encryption1RTT))
 		return nil
 	}
 
@@ -1207,13 +1256,7 @@ func (h *sentPacketHandler) PopPacketNumber(encLevel protocol.EncryptionLevel) p
 }
 
 func (h *sentPacketHandler) SendMode(now monotime.Time) SendMode {
-	numTrackedPackets := h.appDataPackets.history.Len()
-	if h.initialPackets != nil {
-		numTrackedPackets += h.initialPackets.history.Len()
-	}
-	if h.handshakePackets != nil {
-		numTrackedPackets += h.handshakePackets.history.Len()
-	}
+	numTrackedPackets := h.numTrackedPackets()
 
 	if h.isAmplificationLimited() {
 		h.logger.Debugf("Amplification window limited. Received %d bytes, already sent out %d bytes", h.bytesReceived, h.bytesSent)
@@ -1261,9 +1304,27 @@ func (h *sentPacketHandler) SetMaxDatagramSize(s protocol.ByteCount) {
 
 func (h *sentPacketHandler) AdaptiveBDPDebugInfo() (congestion.AdaptiveBDPDebugInfo, bool) {
 	if adaptive, ok := h.congestion.(congestion.SendAlgorithmWithAdaptiveBDPDebugInfo); ok {
-		return adaptive.AdaptiveBDPDebugInfo(), true
+		info := adaptive.AdaptiveBDPDebugInfo()
+		info.PersistentCongestionEvents = h.persistentCongestionEvents
+		info.LastPersistentCongestionSpan = h.lastPersistentCongestionSpan
+		info.LastPersistentCongestionGate = h.lastPersistentCongestionGate
+		info.MaxOutstandingSentPackets = h.maxOutstandingSentPackets()
+		info.MaxTrackedSentPackets = h.maxTrackedSentPackets()
+		info.TrackedSentPackets = h.numTrackedPackets()
+		return info, true
 	}
 	return congestion.AdaptiveBDPDebugInfo{}, false
+}
+
+func (h *sentPacketHandler) numTrackedPackets() int {
+	numTrackedPackets := h.appDataPackets.history.Len()
+	if h.initialPackets != nil {
+		numTrackedPackets += h.initialPackets.history.Len()
+	}
+	if h.handshakePackets != nil {
+		numTrackedPackets += h.handshakePackets.history.Len()
+	}
+	return numTrackedPackets
 }
 
 func (h *sentPacketHandler) isAmplificationLimited() bool {
@@ -1356,6 +1417,7 @@ func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 	h.deliveredBytes = 0
 	h.deliveredTime = 0
 	h.firstSentTime = 0
+	h.resetPersistentCongestionInterval()
 	var firstPacketSendTime monotime.Time
 	for _, p := range h.initialPackets.history.Packets() {
 		if firstPacketSendTime.IsZero() {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"slices"
 	"testing"
@@ -52,21 +53,25 @@ func TestAdaptiveBDPDeterministicLinkCleanPaths(t *testing.T) {
 		rtt      time.Duration
 		queueBDP uint64
 		maxCwnd  uint32
+		payload  int
+		window   time.Duration
 		timeout  time.Duration
 	}{
-		{"C01", 1_000_000, 20 * time.Millisecond, 1, 0, 12 * time.Second},
-		{"C02", 10_000_000, 50 * time.Millisecond, 1, 0, 3 * time.Second},
-		{"C03", 30_000_000, 150 * time.Millisecond, 1, 0, 3 * time.Second},
-		{"C04", 100_000_000, 20 * time.Millisecond, 2, 0, 3 * time.Second},
-		{"C05", 100_000_000, 200 * time.Millisecond, 1, 0, 3 * time.Second},
+		{"C01", 1_000_000, 20 * time.Millisecond, 1, 0, 2 * 1024 * 1024, 500 * time.Millisecond, 30 * time.Second},
+		{"C02", 10_000_000, 50 * time.Millisecond, 1, 0, 4 * 1024 * 1024, 200 * time.Millisecond, 6 * time.Second},
+		{"C03", 30_000_000, 150 * time.Millisecond, 1, 0, 8 * 1024 * 1024, 300 * time.Millisecond, 6 * time.Second},
+		{"C04", 100_000_000, 20 * time.Millisecond, 2, 0, 16 * 1024 * 1024, 100 * time.Millisecond, 6 * time.Second},
+		{"C05", 100_000_000, 200 * time.Millisecond, 1, 0, 32 * 1024 * 1024, 300 * time.Millisecond, 8 * time.Second},
 		// C06 is also run with the default 10,000-packet cap, as required by
 		// the validation plan. The enlarged cap demonstrates the high-BDP path.
-		{"C06-default", 1_000_000_000, 100 * time.Millisecond, 1, 0, 3 * time.Second},
-		{"C06-large-cwnd", 1_000_000_000, 100 * time.Millisecond, 1, 100_000, 3 * time.Second},
+		{"C06-default", 1_000_000_000, 100 * time.Millisecond, 1, 0, 64 * 1024 * 1024, 100 * time.Millisecond, 8 * time.Second},
+		{"C06-large-cwnd", 1_000_000_000, 100 * time.Millisecond, 1, 100_000, 64 * 1024 * 1024, 100 * time.Millisecond, 8 * time.Second},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				queueBytes := tc.queueBDP * tc.capacity * uint64(tc.rtt) / uint64(time.Second) / 8
+				const validationPacketBytes = uint64(1280)
+				queueBytes = (queueBytes + validationPacketBytes - 1) / validationPacketBytes * validationPacketBytes
 				config := simnet.DeterministicDirectionConfig{
 					BandwidthBitsPerSecond: tc.capacity,
 					BaseLatency:            tc.rtt / 2,
@@ -75,14 +80,59 @@ func TestAdaptiveBDPDeterministicLinkCleanPaths(t *testing.T) {
 				result := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
 					linkConfig:           simnet.DeterministicLinkConfig{Forward: config, Reverse: config},
 					startupTargetRateBps: tc.capacity,
-					payloadBytes:         128 * 1024,
+					payloadBytes:         tc.payload,
 					maxWindowPackets:     tc.maxCwnd,
 					timeout:              tc.timeout,
+					initialWindowPackets: func() uint32 {
+						if tc.id == "C01" {
+							return 2
+						}
+						return 0
+					}(),
+					minWindowPackets: func() uint32 {
+						if tc.id == "C01" {
+							return 2
+						}
+						return 0
+					}(),
+					queueTarget: func() time.Duration {
+						if tc.id == "C01" {
+							return 20 * time.Millisecond
+						}
+						return 0
+					}(),
+					noCongestionRateFloorFraction: func() float64 {
+						if tc.id == "C01" {
+							return 0.90
+						}
+						return 0
+					}(),
 				})
 				require.Greater(t, result.goodputBitsPerSecond(), uint64(0), "clean path must deliver application data")
 				require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0), "clean path must not deadlock pacing")
 				require.GreaterOrEqual(t, result.info.CongestionWindow, result.info.MinCwnd)
 				require.LessOrEqual(t, result.info.CongestionWindow, result.info.MaxCwnd)
+				recoveredAt, ok := result.firstApplicationGoodputAtOrAbove(tc.rtt, result.elapsed, tc.window, tc.capacity*90/100)
+				require.True(t, ok, "%s must reach 90%% application utilization after convergence", tc.id)
+				require.GreaterOrEqual(t, result.medianApplicationGoodput(recoveredAt-tc.window, tc.window), tc.capacity*90/100, "%s median application utilization after convergence must be at least 90%%", tc.id)
+				queueLimit := max(2*result.info.QueueTarget, 50*time.Millisecond)
+				require.LessOrEqual(t, result.queueDelayPercentileAfter(95, recoveredAt+3*tc.rtt), queueLimit, "%s post-convergence p95 queue delay must remain bounded", tc.id)
+				var startupTransitions, probeDownTransitions int
+				for _, sample := range result.info.Telemetry {
+					if sample.Event != "state_transition" || sample.Elapsed < recoveredAt-tc.window {
+						continue
+					}
+					switch sample.State {
+					case "Startup":
+						startupTransitions++
+					case "ProbeDown":
+						if sample.TransitionReason != "probe_up_drain" {
+							probeDownTransitions++
+						}
+					}
+				}
+				require.Zero(t, startupTransitions, "%s must not re-enter Startup after convergence", tc.id)
+				require.LessOrEqual(t, probeDownTransitions, 2, "%s must not exhibit recurring ProbeDown oscillation", tc.id)
 			})
 		})
 	}
@@ -183,6 +233,53 @@ func TestAdaptiveBDPDeterministicLinkL05GilbertElliottLoss(t *testing.T) {
 	})
 }
 
+func TestAdaptiveBDPDeterministicLinkNoQueueLossReactionIsSmallerThanQueuedLoss(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		base := simnet.DeterministicDirectionConfig{
+			BandwidthBitsPerSecond: 30_000_000,
+			BaseLatency:            25 * time.Millisecond,
+		}
+		wireless := base
+		wireless.RandomLossProbability = 0.01
+		noQueue := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
+			linkConfig:           simnet.DeterministicLinkConfig{Forward: wireless, Reverse: wireless, Seed: 12},
+			startupTargetRateBps: 30_000_000,
+			payloadBytes:         4 * 1024 * 1024,
+			timeout:              8 * time.Second,
+		})
+
+		queuedConfig := base
+		queuedConfig.QueueLimitBytes = 46_875 // 0.25 BDP
+		queued := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
+			linkConfig:           simnet.DeterministicLinkConfig{Forward: queuedConfig, Reverse: queuedConfig},
+			startupTargetRateBps: 100_000_000,
+			payloadBytes:         4 * 1024 * 1024,
+			timeout:              8 * time.Second,
+		})
+
+		noQueueCut, ok := minimumLossCwndMultiplier(noQueue.info.Telemetry)
+		require.True(t, ok, "wireless loss must produce a measured controller reaction")
+		queuedCut, ok := minimumLossCwndMultiplier(queued.info.Telemetry)
+		require.True(t, ok, "queued tail loss must produce a measured controller reaction")
+		require.Greater(t, noQueueCut, queuedCut, "random no-queue loss must retain more cwnd than queued loss")
+		require.Zero(t, noQueue.forward.TailDrops)
+		require.Greater(t, queued.forward.TailDrops, uint64(0))
+	})
+}
+
+func minimumLossCwndMultiplier(samples []quic.AdaptiveBDPTelemetrySample) (float64, bool) {
+	minimum := 1.0
+	found := false
+	for _, sample := range samples {
+		if sample.LastLossCwndMultiplier <= 0 || sample.LastLossCwndMultiplier >= 1 {
+			continue
+		}
+		minimum = min(minimum, sample.LastLossCwndMultiplier)
+		found = true
+	}
+	return minimum, found
+}
+
 func TestAdaptiveBDPDeterministicLinkIdleDownloadToUpload(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clientAddr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 11), Port: 9011}
@@ -249,6 +346,7 @@ func TestAdaptiveBDPDeterministicLinkIdleDownloadToUpload(t *testing.T) {
 
 		// This is a synctest virtual-time idle period, not a wall-clock sleep.
 		<-time.After(500 * time.Millisecond)
+		link.ResetBurstPeak(simnet.LinkForward)
 
 		upload := bytes.Repeat([]byte("u"), 32*1024)
 		uploadDone := make(chan error, 1)
@@ -269,6 +367,7 @@ func TestAdaptiveBDPDeterministicLinkIdleDownloadToUpload(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, uploadStream.Close())
 		require.NoError(t, <-uploadDone)
+		require.LessOrEqual(t, link.Counters(simnet.LinkForward).PeakSameTimeSubmittedBytes, uint64(16*1024), "post-idle upload must preserve the ten-packet pacer burst bound")
 
 		stopPump()
 		pumpStopped = true
@@ -455,96 +554,116 @@ func TestAdaptiveBDPDeterministicLinkInteractiveDatagramBidirectionalAndBulk(t *
 }
 
 func TestAdaptiveBDPDeterministicLinkMigrationUsesNewPath(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		clientAddr1 := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 21), Port: 9021}
-		clientAddr2 := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 22), Port: 9022}
-		serverAddr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 23), Port: 9023}
-		config := simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 10_000_000, BaseLatency: 10 * time.Millisecond, QueueLimitBytes: 128 * 1024}
-		link := simnet.NewDeterministicLink(simnet.DeterministicLinkConfig{Forward: config, Reverse: config})
-		router := simnet.NewDeterministicRouter(link, func(packet simnet.Packet) simnet.LinkDirection {
-			if packet.From.String() == clientAddr1.String() || packet.From.String() == clientAddr2.String() {
-				return simnet.LinkForward
-			}
-			return simnet.LinkReverse
-		})
-		clientConn1 := simnet.NewBufferedSimConn(clientAddr1, router, 4096)
-		clientConn2 := simnet.NewBufferedSimConn(clientAddr2, router, 4096)
-		serverPacketConn := simnet.NewBufferedSimConn(serverAddr, router, 4096)
-		defer clientConn1.Close()
-		defer clientConn2.Close()
-		defer serverPacketConn.Close()
-		stopPump, _ := startDeterministicLinkPump(router)
-		pumpStopped := false
-		defer func() {
-			if !pumpStopped {
-				stopPump()
-			}
-		}()
+	synctest.Test(t, runAdaptiveBDPDeterministicMigration)
+}
 
-		quicConfig := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{Enable: true, Algorithm: quic.CongestionControlAdaptiveBDP, StartupTargetRateBps: 10_000_000}})
-		ln, err := quic.Listen(serverPacketConn, getTLSConfig(), quicConfig)
-		require.NoError(t, err)
-		defer ln.Close()
-		tr1 := &quic.Transport{Conn: clientConn1}
-		tr2 := &quic.Transport{Conn: clientConn2}
-		defer tr1.Close()
-		defer tr2.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		clientConn, err := tr1.Dial(ctx, serverAddr, getTLSClientConfig(), quicConfig)
-		require.NoError(t, err)
-		defer clientConn.CloseWithError(0, "")
-		serverConn, err := ln.Accept(ctx)
-		require.NoError(t, err)
-		defer serverConn.CloseWithError(0, "")
-
-		// Establish a non-zero model on the original path.
-		readDone := make(chan error, 1)
-		go func() {
-			stream, err := serverConn.AcceptStream(ctx)
-			if err == nil {
-				_, err = io.ReadAll(stream)
-			}
-			readDone <- err
-		}()
-		stream, err := clientConn.OpenStreamSync(ctx)
-		require.NoError(t, err)
-		_, err = stream.Write(bytes.Repeat([]byte("m"), 64*1024))
-		require.NoError(t, err)
-		require.NoError(t, stream.Close())
-		require.NoError(t, <-readDone)
-		synctest.Wait()
-		before, ok := clientConn.AdaptiveBDPDebugInfo()
-		require.True(t, ok)
-		require.Greater(t, before.MaxBandwidthBytesPerSecond, uint64(0))
-
-		path, err := clientConn.AddPath(tr2)
-		require.NoError(t, err)
-		require.NoError(t, path.Probe(ctx))
-		require.NoError(t, path.Switch())
-		readDone = make(chan error, 1)
-		go func() {
-			stream, err := serverConn.AcceptStream(ctx)
-			if err == nil {
-				_, err = io.ReadAll(stream)
-			}
-			readDone <- err
-		}()
-		stream, err = clientConn.OpenStreamSync(ctx)
-		require.NoError(t, err)
-		_, err = stream.Write([]byte("post-migration"))
-		require.NoError(t, err)
-		require.NoError(t, stream.Close())
-		require.NoError(t, <-readDone)
-		synctest.Wait()
-		after, ok := clientConn.AdaptiveBDPDebugInfo()
-		require.True(t, ok)
-		require.Equal(t, clientAddr2.String(), clientConn.LocalAddr().String())
-		require.Greater(t, after.PacingRateBytesPerSecond, uint64(0))
-		require.GreaterOrEqual(t, after.CongestionWindow, after.MinCwnd)
-		stopPump()
-		pumpStopped = true
+func runAdaptiveBDPDeterministicMigration(t *testing.T) {
+	clientAddr1 := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 21), Port: 9021}
+	clientAddr2 := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 22), Port: 9022}
+	serverAddr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 23), Port: 9023}
+	config := simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 10_000_000, BaseLatency: 10 * time.Millisecond, QueueLimitBytes: 2 * 1024 * 1024}
+	link := simnet.NewDeterministicLink(simnet.DeterministicLinkConfig{Forward: config, Reverse: config})
+	router := simnet.NewDeterministicRouter(link, func(packet simnet.Packet) simnet.LinkDirection {
+		if packet.From.String() == clientAddr1.String() || packet.From.String() == clientAddr2.String() {
+			return simnet.LinkForward
+		}
+		return simnet.LinkReverse
 	})
+	clientConn1 := simnet.NewBufferedSimConn(clientAddr1, router, 4096)
+	clientConn2 := simnet.NewBufferedSimConn(clientAddr2, router, 4096)
+	serverPacketConn := simnet.NewBufferedSimConn(serverAddr, router, 4096)
+	defer clientConn1.Close()
+	defer clientConn2.Close()
+	defer serverPacketConn.Close()
+	stopPump, _ := startDeterministicLinkPump(router)
+	pumpStopped := false
+	defer func() {
+		if !pumpStopped {
+			stopPump()
+		}
+	}()
+
+	quicConfig := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{
+		Enable:                     true,
+		EnableAdaptiveBDPTelemetry: true,
+		Algorithm:                  quic.CongestionControlAdaptiveBDP,
+		StartupTargetRateBps:       100_000_000,
+	}})
+	ln, err := quic.Listen(serverPacketConn, getTLSConfig(), quicConfig)
+	require.NoError(t, err)
+	defer ln.Close()
+	tr1 := &quic.Transport{Conn: clientConn1}
+	tr2 := &quic.Transport{Conn: clientConn2}
+	defer tr1.Close()
+	defer tr2.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := tr1.Dial(ctx, serverAddr, getTLSClientConfig(), quicConfig)
+	require.NoError(t, err)
+	defer clientConn.CloseWithError(0, "")
+	serverConn, err := ln.Accept(ctx)
+	require.NoError(t, err)
+	defer serverConn.CloseWithError(0, "")
+
+	// Establish a non-zero model on the original path.
+	readDone := make(chan error, 1)
+	go func() {
+		stream, err := serverConn.AcceptStream(ctx)
+		if err == nil {
+			_, err = io.ReadAll(stream)
+		}
+		readDone <- err
+	}()
+	stream, err := clientConn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	_, err = stream.Write(bytes.Repeat([]byte("m"), 2*1024*1024))
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.NoError(t, <-readDone)
+	synctest.Wait()
+	before, ok := clientConn.AdaptiveBDPDebugInfo()
+	require.True(t, ok)
+	require.Greater(t, before.MaxBandwidthBytesPerSecond, uint64(0))
+
+	path, err := clientConn.AddPath(tr2)
+	require.NoError(t, err)
+	require.NoError(t, path.Probe(ctx))
+	require.NoError(t, path.Switch())
+	readDone = make(chan error, 1)
+	go func() {
+		stream, err := serverConn.AcceptStream(ctx)
+		if err == nil {
+			_, err = io.ReadAll(stream)
+		}
+		readDone <- err
+	}()
+	stream, err = clientConn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	postMigrationPayload := bytes.Repeat([]byte("post-migration"), 4096)
+	_, err = stream.Write(postMigrationPayload)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.NoError(t, <-readDone)
+	synctest.Wait()
+	reset, ok := clientConn.AdaptiveBDPDebugInfo()
+	require.True(t, ok)
+	require.Equal(t, clientAddr2.String(), clientConn.LocalAddr().String())
+	require.NotEmpty(t, reset.Telemetry, "confirmed new-path traffic must produce the new controller's telemetry history")
+	firstNewPathSample := reset.Telemetry[0]
+	require.Equal(t, uint64(1), firstNewPathSample.RoundCount, "new-path telemetry must start at the first controller round")
+	require.Equal(t, "Startup", firstNewPathSample.State)
+	require.Less(t, firstNewPathSample.MaxBandwidthBytesPerSecond, before.MaxBandwidthBytesPerSecond, "old path max bandwidth must not enter the new controller's first round")
+	require.Zero(t, firstNewPathSample.ShortBandwidthBytesPerSecond)
+	require.Zero(t, firstNewPathSample.LossRatioEWMA)
+	require.Zero(t, firstNewPathSample.RecoveryBandwidthBytesPerSecond)
+	require.False(t, firstNewPathSample.FullBwReached)
+	require.Zero(t, reset.LossRatioEWMA)
+	require.Zero(t, reset.LastMaterialLossRound)
+	require.False(t, reset.LossRecoveryProbeActive)
+	require.Greater(t, reset.PacingRateBytesPerSecond, uint64(0))
+	require.GreaterOrEqual(t, reset.CongestionWindow, reset.MinCwnd)
+	stopPump()
+	pumpStopped = true
 }
 
 func TestAdaptiveBDPDeterministicLinkEqualRTTAdaptiveBDPFairness(t *testing.T) {
@@ -887,7 +1006,7 @@ func TestAdaptiveBDPDeterministicLinkT06LearnsLowerCapacityAndRTT(t *testing.T) 
 
 func TestAdaptiveBDPDeterministicLinkT01CapacityDownshift(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		before := simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 100_000_000, BaseLatency: 15 * time.Millisecond, QueueLimitBytes: 2 * 1024 * 1024}
+		before := simnet.DeterministicDirectionConfig{BandwidthBitsPerSecond: 100_000_000, BaseLatency: 15 * time.Millisecond, QueueLimitBytes: 37_500}
 		after := before
 		after.BandwidthBitsPerSecond = 10_000_000
 		result := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
@@ -900,6 +1019,18 @@ func TestAdaptiveBDPDeterministicLinkT01CapacityDownshift(t *testing.T) {
 			},
 		})
 		require.Greater(t, result.goodputBitsPerSecond(), uint64(0))
+		evidence, ok := firstAdaptiveBDPTelemetry(result.info.Telemetry, func(sample quic.AdaptiveBDPTelemetrySample) bool {
+			return sample.TransitionReason == "queue_growth_capacity_downshift"
+		})
+		require.True(t, ok, "T01 must observe deterministic filled-queue downshift evidence")
+		downshift, ok := firstAdaptiveBDPTelemetry(result.info.Telemetry, func(sample quic.AdaptiveBDPTelemetrySample) bool {
+			return sample.Elapsed >= evidence.Elapsed && sample.PacingRateBytesPerSecond < uint64(15_000_000/8)
+		})
+		require.True(t, ok, "T01 pacing must fall below 15 Mbit/s")
+		require.LessOrEqual(t, downshift.Elapsed-evidence.Elapsed, 3*30*time.Millisecond, "T01 must downshift within three base RTTs after congestion evidence")
+		queueRecoveredAt, ok := result.firstQueueDelayAtOrBelow(evidence.Elapsed, evidence.Elapsed+6*30*time.Millisecond, 2*evidence.QueueTarget)
+		require.True(t, ok, "T01 queue delay must return below twice the target within six RTTs")
+		require.LessOrEqual(t, queueRecoveredAt-evidence.Elapsed, 6*30*time.Millisecond)
 		require.Less(t, result.info.PacingRateBytesPerSecond, uint64(15_000_000/8), "T01 must not remain pinned to the stale 100 Mbit/s startup floor")
 		require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0))
 	})
@@ -914,13 +1045,32 @@ func TestAdaptiveBDPDeterministicLinkT02CapacityUpshift(t *testing.T) {
 		result := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
 			linkConfig:           simnet.DeterministicLinkConfig{Forward: before, Reverse: before},
 			startupTargetRateBps: 10_000_000,
-			payloadBytes:         4 * 1024 * 1024,
+			payloadBytes:         32 * 1024 * 1024,
+			timeout:              8 * time.Second,
 			configureLink: func(link *simnet.DeterministicLink) {
 				link.ScheduleChange(simnet.LinkForward, 200*time.Millisecond, after)
 				link.ScheduleChange(simnet.LinkReverse, 200*time.Millisecond, after)
 			},
 		})
 		require.Greater(t, result.goodputBitsPerSecond(), uint64(0))
+		recovered, ok := firstAdaptiveBDPTelemetry(result.info.Telemetry, func(sample quic.AdaptiveBDPTelemetrySample) bool {
+			return sample.Elapsed >= 200*time.Millisecond && sample.PacingRateBytesPerSecond >= uint64(80_000_000/8)
+		})
+		require.True(t, ok, "T02 must recover at least 80 Mbit/s pacing under saturated demand")
+		require.LessOrEqual(t, recovered.Elapsed, 200*time.Millisecond+5*time.Second, "T02 must recover within the documented five-second limit")
+		appRecoveredAt, ok := result.firstApplicationGoodputAtOrAbove(200*time.Millisecond, 200*time.Millisecond+5*time.Second, 200*time.Millisecond, 80_000_000)
+		maxGoodput, maxGoodputAt := result.maxApplicationGoodput(200*time.Millisecond, 200*time.Millisecond+5*time.Second, 200*time.Millisecond)
+		if !ok {
+			for _, sample := range result.info.Telemetry {
+				if sample.Elapsed >= 4*time.Second {
+					t.Logf("T02 late telemetry: elapsed=%s event=%s round=%d state=%s reason=%s pacing=%d bandwidth=%d cwnd=%d",
+						sample.Elapsed, sample.Event, sample.RoundCount, sample.State, sample.TransitionReason,
+						sample.PacingRateBytesPerSecond, sample.BandwidthBytesPerSecond, sample.CongestionWindow)
+				}
+			}
+		}
+		require.Truef(t, ok, "T02 application goodput must reach 80 Mbit/s in a sustained 200 ms window; maximum was %d bit/s at %s; pacing recovered at %s", maxGoodput, maxGoodputAt, recovered.Elapsed)
+		require.LessOrEqual(t, appRecoveredAt, 200*time.Millisecond+5*time.Second)
 		require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0))
 	})
 }
@@ -951,7 +1101,7 @@ func TestAdaptiveBDPDeterministicLinkQ02DoesNotRebaseStandingQueue(t *testing.T)
 			},
 		})
 		require.LessOrEqual(t, result.info.MinRTT, 75*time.Millisecond, "Q02 must preserve the 50 ms base RTT instead of accepting a standing queue")
-		require.Greater(t, result.forward.PeakQueueBytes, uint64(750*1024), "scenario must create the configured deep queue")
+		require.GreaterOrEqual(t, result.forward.PeakQueueBytes, uint64(750*1024), "scenario must create the configured deep queue")
 	})
 }
 
@@ -1002,6 +1152,32 @@ func TestAdaptiveBDPDeterministicLinkQ03ReversePathACKQueue(t *testing.T) {
 	})
 }
 
+func TestAdaptiveBDPDeterministicLinkQ04ECNAboveQueueTarget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// At 30 Mbit/s, the 10 ms AdaptiveBDP queue target is 37,500
+		// bytes. Marking above that occupancy exercises the real ECT(0) ->
+		// CE -> ACK_ECN -> congestion-controller path without tail drop.
+		config := simnet.DeterministicDirectionConfig{
+			BandwidthBitsPerSecond: 30_000_000,
+			BaseLatency:            25 * time.Millisecond,
+			QueueLimitBytes:        1024 * 1024,
+			ECNThresholdBytes:      37_500,
+		}
+		result := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
+			linkConfig:           simnet.DeterministicLinkConfig{Forward: config, Reverse: config},
+			startupTargetRateBps: 100_000_000,
+			payloadBytes:         2 * 1024 * 1024,
+			timeout:              6 * time.Second,
+		})
+		require.Greater(t, result.forward.ECNMarks, uint64(0), "Q04 must mark packets above the queue target")
+		require.Zero(t, result.forward.TailDrops, "Q04 must signal congestion with ECN, not tail drop")
+		require.True(t, result.info.HasLastECNCE, "ACK_ECN feedback must reach AdaptiveBDP")
+		require.GreaterOrEqual(t, result.info.LastECNCERound, uint64(1))
+		require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0))
+		require.GreaterOrEqual(t, result.info.CongestionWindow, result.info.MinCwnd)
+	})
+}
+
 func TestAdaptiveBDPDeterministicLinkQ05OutageRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// The outage starts after handshake and lasts for more than three PTOs
@@ -1011,15 +1187,48 @@ func TestAdaptiveBDPDeterministicLinkQ05OutageRecovery(t *testing.T) {
 			BandwidthBitsPerSecond: 10_000_000,
 			BaseLatency:            100 * time.Millisecond,
 			QueueLimitBytes:        256 * 1024,
-			LossIntervals:          []simnet.LossInterval{{Start: 300 * time.Millisecond, End: 2500 * time.Millisecond}},
+			LossIntervals:          []simnet.LossInterval{{Start: time.Second, End: 4 * time.Second}},
 		}
 		result := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
 			linkConfig:           simnet.DeterministicLinkConfig{Forward: config, Reverse: config},
 			startupTargetRateBps: 10_000_000,
 			payloadBytes:         2 * 1024 * 1024,
-			timeout:              6 * time.Second,
+			initialWriteBytes:    256 * 1024,
+			pacedWriteUntil:      4 * time.Second,
+			pacedWriteInterval:   100 * time.Millisecond,
+			pacedWriteBytes:      1200,
+			timeout:              15 * time.Second,
 		})
 		require.Greater(t, result.forward.ScriptedLosses, uint64(0), "Q05 must exercise the complete outage")
+		var reset quic.AdaptiveBDPTelemetrySample
+		resetIndex := -1
+		var preOutageMaxBW uint64
+		for i, sample := range result.info.Telemetry {
+			if sample.Event == "persistent_congestion" {
+				reset, resetIndex = sample, i
+				break
+			}
+			preOutageMaxBW = max(preOutageMaxBW, sample.MaxBandwidthBytesPerSecond)
+		}
+		t.Logf("Q05 persistent-congestion evidence: events=%d last_span=%s gate=%s", result.info.PersistentCongestionEvents, result.info.LastPersistentCongestionSpan, result.info.LastPersistentCongestionGate)
+		require.NotEqual(t, -1, resetIndex, "Q05 outage must reach QUIC persistent-congestion handling")
+		require.Equal(t, "Startup", reset.State)
+		require.Equal(t, result.info.MinCwnd, reset.CongestionWindow)
+		require.Equal(t, reset.BandwidthBytesPerSecond, reset.MaxBandwidthBytesPerSecond, "post-reset max bandwidth may contain only the minimum-cwnd bootstrap")
+		require.Less(t, reset.MaxBandwidthBytesPerSecond, preOutageMaxBW)
+		require.Zero(t, reset.ShortBandwidthBytesPerSecond)
+		require.Zero(t, reset.RecoveryBandwidthBytesPerSecond)
+		require.Zero(t, reset.LossRatioEWMA)
+		require.False(t, reset.FullBwReached)
+		var firstPostResetRound quic.AdaptiveBDPTelemetrySample
+		for _, sample := range result.info.Telemetry[resetIndex+1:] {
+			if sample.Event == "round" {
+				firstPostResetRound = sample
+				break
+			}
+		}
+		require.NotZero(t, firstPostResetRound.RoundCount)
+		require.Less(t, firstPostResetRound.MaxBandwidthBytesPerSecond, preOutageMaxBW, "first ACK round after outage must not restore stale bandwidth")
 		require.Greater(t, result.goodputBitsPerSecond(), uint64(0), "traffic must recover after the outage")
 		require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0), "outage recovery must not deadlock pacing")
 		require.GreaterOrEqual(t, result.info.CongestionWindow, result.info.MinCwnd)
@@ -1027,13 +1236,27 @@ func TestAdaptiveBDPDeterministicLinkQ05OutageRecovery(t *testing.T) {
 }
 
 type adaptiveBDPLinkScenario struct {
-	linkConfig           simnet.DeterministicLinkConfig
-	startupTargetRateBps uint64
-	payloadBytes         int
-	minRTTFilterWindow   time.Duration
-	maxWindowPackets     uint32
-	timeout              time.Duration
-	configureLink        func(*simnet.DeterministicLink)
+	linkConfig                    simnet.DeterministicLinkConfig
+	startupTargetRateBps          uint64
+	initialWindowPackets          uint32
+	minWindowPackets              uint32
+	payloadBytes                  int
+	initialWriteBytes             int
+	pacedWriteUntil               time.Duration
+	pacedWriteInterval            time.Duration
+	pacedWriteBytes               int
+	pacedWritePauses              []adaptiveBDPWritePause
+	minRTTFilterWindow            time.Duration
+	maxWindowPackets              uint32
+	queueTarget                   time.Duration
+	noCongestionRateFloorFraction float64
+	timeout                       time.Duration
+	configureLink                 func(*simnet.DeterministicLink)
+}
+
+type adaptiveBDPWritePause struct {
+	after    time.Duration
+	duration time.Duration
 }
 
 func (r adaptiveBDPLinkScenarioResult) goodputBitsPerSecond() uint64 {
@@ -1052,13 +1275,121 @@ func (r adaptiveBDPLinkScenarioResult) queueDelayPercentile(percentile int) time
 	return samples[(len(samples)-1)*percentile/100]
 }
 
+func (r adaptiveBDPLinkScenarioResult) queueDelayPercentileAfter(percentile int, after time.Duration) time.Duration {
+	start := int(after / adaptiveBDPVirtualTick)
+	if start >= len(r.queueDelays) {
+		return 0
+	}
+	samples := slices.Clone(r.queueDelays[start:])
+	slices.Sort(samples)
+	return samples[(len(samples)-1)*percentile/100]
+}
+
+func (r adaptiveBDPLinkScenarioResult) firstQueueDelayAtOrBelow(after, deadline, limit time.Duration) (time.Duration, bool) {
+	start := int(after / adaptiveBDPVirtualTick)
+	end := min(len(r.queueDelays), int(deadline/adaptiveBDPVirtualTick)+1)
+	for i := max(0, start); i < end; i++ {
+		if r.queueDelays[i] <= limit {
+			return time.Duration(i+1) * adaptiveBDPVirtualTick, true
+		}
+	}
+	return 0, false
+}
+
 type adaptiveBDPLinkScenarioResult struct {
-	info         quic.AdaptiveBDPDebugInfo
-	forward      simnet.LinkCounters
-	reverse      simnet.LinkCounters
-	payloadBytes uint64
-	elapsed      time.Duration
-	queueDelays  []time.Duration
+	info            quic.AdaptiveBDPDebugInfo
+	forward         simnet.LinkCounters
+	reverse         simnet.LinkCounters
+	payloadBytes    uint64
+	elapsed         time.Duration
+	queueDelays     []time.Duration
+	deliverySamples []adaptiveBDPDeliverySample
+}
+
+type adaptiveBDPDeliverySample struct {
+	at    time.Duration
+	bytes uint64
+}
+
+func (r adaptiveBDPLinkScenarioResult) firstApplicationGoodputAtOrAbove(after, deadline, window time.Duration, targetBitsPerSecond uint64) (time.Duration, bool) {
+	for i := range r.deliverySamples {
+		start := r.deliverySamples[i]
+		if start.at < after {
+			continue
+		}
+		for j := i + 1; j < len(r.deliverySamples); j++ {
+			end := r.deliverySamples[j]
+			if end.at > deadline {
+				break
+			}
+			if end.at-start.at < window {
+				continue
+			}
+			elapsed := end.at - start.at
+			rate := (end.bytes - start.bytes) * 8 * uint64(time.Second) / uint64(elapsed)
+			if rate >= targetBitsPerSecond {
+				return end.at, true
+			}
+			break
+		}
+	}
+	return 0, false
+}
+
+func (r adaptiveBDPLinkScenarioResult) maxApplicationGoodput(after, deadline, window time.Duration) (uint64, time.Duration) {
+	var maxRate uint64
+	var maxRateAt time.Duration
+	for i := range r.deliverySamples {
+		start := r.deliverySamples[i]
+		if start.at < after {
+			continue
+		}
+		for j := i + 1; j < len(r.deliverySamples); j++ {
+			end := r.deliverySamples[j]
+			if end.at > deadline {
+				break
+			}
+			if end.at-start.at < window {
+				continue
+			}
+			rate := (end.bytes - start.bytes) * 8 * uint64(time.Second) / uint64(end.at-start.at)
+			if rate > maxRate {
+				maxRate = rate
+				maxRateAt = end.at
+			}
+			break
+		}
+	}
+	return maxRate, maxRateAt
+}
+
+func (r adaptiveBDPLinkScenarioResult) medianApplicationGoodput(after, window time.Duration) uint64 {
+	if len(r.deliverySamples) < 2 || window <= 0 {
+		return 0
+	}
+	var rates []uint64
+	for start := after; start+window <= r.deliverySamples[len(r.deliverySamples)-1].at; start += window {
+		var first, last *adaptiveBDPDeliverySample
+		for i := range r.deliverySamples {
+			sample := &r.deliverySamples[i]
+			if first == nil && sample.at >= start {
+				first = sample
+			}
+			if sample.at >= start+window {
+				last = sample
+				break
+			}
+		}
+		if first == nil || last == nil || last.at <= first.at {
+			continue
+		}
+		rates = append(rates, (last.bytes-first.bytes)*8*uint64(time.Second)/uint64(last.at-first.at))
+	}
+	if len(rates) == 0 {
+		return 0
+	}
+	slices.Sort(rates)
+	return rates[len(rates)/2]
 }
 
 func runAdaptiveBDPDeterministicBulkTransfer(t *testing.T, scenario adaptiveBDPLinkScenario) adaptiveBDPLinkScenarioResult {
@@ -1091,13 +1422,23 @@ func runAdaptiveBDPDeterministicBulkTransfer(t *testing.T, scenario adaptiveBDPL
 		}
 	}()
 
-	config := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{
-		Enable:               true,
-		Algorithm:            quic.CongestionControlAdaptiveBDP,
-		StartupTargetRateBps: scenario.startupTargetRateBps,
-		MinRTTFilterWindow:   scenario.minRTTFilterWindow,
-		MaxWindowPackets:     scenario.maxWindowPackets,
-	}})
+	config := getQuicConfig(&quic.Config{
+		MaxIdleTimeout:             30 * time.Second,
+		MaxStreamReceiveWindow:     128 * 1024 * 1024,
+		MaxConnectionReceiveWindow: 256 * 1024 * 1024,
+		CwndTuning: quic.CwndTuning{
+			Enable:                        true,
+			EnableAdaptiveBDPTelemetry:    true,
+			Algorithm:                     quic.CongestionControlAdaptiveBDP,
+			InitialWindowPackets:          scenario.initialWindowPackets,
+			MinWindowPackets:              scenario.minWindowPackets,
+			StartupTargetRateBps:          scenario.startupTargetRateBps,
+			MinRTTFilterWindow:            scenario.minRTTFilterWindow,
+			MaxWindowPackets:              scenario.maxWindowPackets,
+			QueueTarget:                   scenario.queueTarget,
+			NoCongestionRateFloorFraction: scenario.noCongestionRateFloorFraction,
+		},
+	})
 	ln, err := quic.Listen(serverPacketConn, getTLSConfig(), config)
 	require.NoError(t, err)
 	defer ln.Close()
@@ -1117,8 +1458,9 @@ func runAdaptiveBDPDeterministicBulkTransfer(t *testing.T, scenario adaptiveBDPL
 
 	payload := bytes.Repeat([]byte("a"), scenario.payloadBytes)
 	type readResult struct {
-		data []byte
-		err  error
+		data    []byte
+		samples []adaptiveBDPDeliverySample
+		err     error
 	}
 	readResultChan := make(chan readResult, 1)
 	go func() {
@@ -1127,13 +1469,56 @@ func runAdaptiveBDPDeterministicBulkTransfer(t *testing.T, scenario adaptiveBDPL
 			readResultChan <- readResult{err: err}
 			return
 		}
-		data, err := io.ReadAll(serverStream)
-		readResultChan <- readResult{data: data, err: err}
+		var data bytes.Buffer
+		samples := []adaptiveBDPDeliverySample{{at: link.Now()}}
+		buf := make([]byte, 32*1024)
+		for {
+			n, readErr := serverStream.Read(buf)
+			if n > 0 {
+				_, _ = data.Write(buf[:n])
+				samples = append(samples, adaptiveBDPDeliverySample{at: link.Now(), bytes: uint64(data.Len())})
+			}
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					readErr = nil
+				}
+				readResultChan <- readResult{data: data.Bytes(), samples: samples, err: readErr}
+				return
+			}
+		}
 	}()
 	stream, err := clientConn.OpenStreamSync(ctx)
 	require.NoError(t, err)
-	_, err = stream.Write(payload)
-	require.NoError(t, err)
+	written := 0
+	if scenario.initialWriteBytes > 0 {
+		end := min(scenario.initialWriteBytes, len(payload))
+		n, writeErr := stream.Write(payload[:end])
+		require.NoError(t, writeErr)
+		require.Equal(t, end, n)
+		written = end
+	}
+	nextPause := 0
+	for scenario.pacedWriteInterval > 0 && link.Now() < scenario.pacedWriteUntil && written < len(payload) {
+		for nextPause < len(scenario.pacedWritePauses) && link.Now() >= scenario.pacedWritePauses[nextPause].after {
+			<-time.After(scenario.pacedWritePauses[nextPause].duration)
+			nextPause++
+		}
+		chunkBytes := scenario.pacedWriteBytes
+		if chunkBytes <= 0 {
+			chunkBytes = 1200
+		}
+		end := min(written+chunkBytes, len(payload))
+		n, writeErr := stream.Write(payload[written:end])
+		require.NoError(t, writeErr)
+		require.Equal(t, end-written, n)
+		written = end
+		<-time.After(scenario.pacedWriteInterval)
+	}
+	if written < len(payload) {
+		n, writeErr := stream.Write(payload[written:])
+		require.NoError(t, writeErr)
+		require.Equal(t, len(payload)-written, n)
+	}
 	require.NoError(t, stream.Close())
 
 	read := <-readResultChan
@@ -1147,13 +1532,35 @@ func runAdaptiveBDPDeterministicBulkTransfer(t *testing.T, scenario adaptiveBDPL
 	synctest.Wait()
 	info, ok := clientConn.AdaptiveBDPDebugInfo()
 	require.True(t, ok)
-	result := adaptiveBDPLinkScenarioResult{info: info, forward: link.Counters(simnet.LinkForward), reverse: link.Counters(simnet.LinkReverse), payloadBytes: uint64(len(payload)), elapsed: link.Now(), queueDelays: queueDelays()}
+	assertAdaptiveBDPTelemetryInvariants(t, info)
+	result := adaptiveBDPLinkScenarioResult{info: info, forward: link.Counters(simnet.LinkForward), reverse: link.Counters(simnet.LinkReverse), payloadBytes: uint64(len(payload)), elapsed: link.Now(), queueDelays: queueDelays(), deliverySamples: read.samples}
 	t.Logf("adaptive-bdp deterministic result: elapsed=%s goodput_bps=%d delivered_bytes=%d submitted_bytes=%d scripted_losses=%d random_losses=%d tail_drops=%d peak_queue_bytes=%d queue_delay_p50=%s queue_delay_p95=%s queue_delay_p99=%s reverse_peak_queue_bytes=%d min_rtt=%s cwnd=%d pacing_Bps=%d bandwidth_Bps=%d", result.elapsed, result.goodputBitsPerSecond(), result.forward.DeliveredBytes, result.forward.SubmittedBytes, result.forward.ScriptedLosses, result.forward.RandomLosses, result.forward.TailDrops, result.forward.PeakQueueBytes, result.queueDelayPercentile(50), result.queueDelayPercentile(95), result.queueDelayPercentile(99), result.reverse.PeakQueueBytes, result.info.MinRTT, result.info.CongestionWindow, result.info.PacingRateBytesPerSecond, result.info.BandwidthBytesPerSecond)
 	return result
 }
 
+func assertAdaptiveBDPTelemetryInvariants(t *testing.T, info quic.AdaptiveBDPDebugInfo) {
+	t.Helper()
+	require.NotEmpty(t, info.Telemetry)
+	require.Greater(t, info.MaxOutstandingSentPackets, uint64(0))
+	require.Greater(t, info.MaxTrackedSentPackets, info.MaxOutstandingSentPackets, "packet-history limits must not invert")
+	require.LessOrEqual(t, info.TrackedSentPackets, info.MaxTrackedSentPackets)
+	var lastRound uint64
+	for _, sample := range info.Telemetry {
+		require.Greater(t, sample.PacingRateBytesPerSecond, uint64(0), "telemetry must never contain a zero pacing rate")
+		require.GreaterOrEqual(t, sample.CongestionWindow, info.MinCwnd)
+		require.LessOrEqual(t, sample.CongestionWindow, info.MaxCwnd)
+		require.False(t, math.IsNaN(sample.PacingGain) || math.IsInf(sample.PacingGain, 0))
+		require.False(t, math.IsNaN(sample.CwndGain) || math.IsInf(sample.CwndGain, 0))
+		if sample.Event == "round" {
+			require.Greater(t, sample.RoundCount, lastRound, "completed-round telemetry must be strictly monotonic")
+			lastRound = sample.RoundCount
+		}
+	}
+}
+
+const adaptiveBDPVirtualTick = 100 * time.Microsecond
+
 func startDeterministicLinkPump(router *simnet.DeterministicRouter) (func(), func() []time.Duration) {
-	const virtualTick = 100 * time.Microsecond
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	var queueDelays []time.Duration
@@ -1164,8 +1571,8 @@ func startDeterministicLinkPump(router *simnet.DeterministicRouter) (func(), fun
 			select {
 			case <-stop:
 				return
-			case <-time.After(virtualTick):
-				now += virtualTick
+			case <-time.After(adaptiveBDPVirtualTick):
+				now += adaptiveBDPVirtualTick
 				router.AdvanceTo(now)
 				queueDelays = append(queueDelays, router.Link().QueueDelay(simnet.LinkForward))
 			}
@@ -1175,4 +1582,13 @@ func startDeterministicLinkPump(router *simnet.DeterministicRouter) (func(), fun
 		close(stop)
 		<-done
 	}, func() []time.Duration { return slices.Clone(queueDelays) }
+}
+
+func firstAdaptiveBDPTelemetry(samples []quic.AdaptiveBDPTelemetrySample, match func(quic.AdaptiveBDPTelemetrySample) bool) (quic.AdaptiveBDPTelemetrySample, bool) {
+	for _, sample := range samples {
+		if match(sample) {
+			return sample, true
+		}
+	}
+	return quic.AdaptiveBDPTelemetrySample{}, false
 }

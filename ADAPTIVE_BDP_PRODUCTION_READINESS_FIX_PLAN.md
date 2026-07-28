@@ -9,8 +9,8 @@ Execute every work package in a separate Codex / OpenAI Terra session. Do not
 combine packages, because each package has its own correctness gate and review
 scope.
 
-The current production decision is **NO-GO** until every package in this
-document passes.
+The current production decision is **GO**: F11-F15 pass, with the release
+evidence and limitations recorded in `ADAPTIVE_BDP_F15_RELEASE_REPORT.md`.
 
 ## Global Rules
 
@@ -439,6 +439,17 @@ Production is **GO** only when:
 - the worktree changes have been reviewed and committed;
 - the final report includes commands, versions, scenario data, and known
   limitations.
+
+### F15 implementation status (2026-07-28)
+
+**PASS / GO.** The dedicated release workflow enforces Linux/CGO core race,
+full static analysis, Windows and Linux full-repository tests, 100-repeat
+AdaptiveBDP stress, the repeated F14 deterministic matrix, and a 25-cycle
+capacity/RTT/loss/idle/migration soak. Runtime diagnostics make packet-history
+limit inversion directly testable. Windows and local Linux/amd64 verification,
+including the final shuffled integration suite, passed. Commands, versions,
+scenario counts, F13 before/after evidence, and known limitations are recorded
+in `ADAPTIVE_BDP_F15_RELEASE_REPORT.md`; no release blocker remains.
 
 ---
 

@@ -26,8 +26,10 @@ type Packet struct {
 	To   net.Addr
 	From net.Addr
 
-	Data      []byte
-	ECNMarked bool
+	Data []byte
+	// ECNBits uses the two-bit IP header encoding: Not-ECT=0, ECT(1)=1,
+	// ECT(0)=2 and CE=3.
+	ECNBits uint8
 }
 
 // SimConn is a simulated network connection that implements net.PacketConn.
@@ -167,17 +169,17 @@ func (c *SimConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // ReadFromWithECN is ReadFrom plus the deterministic link's ECN-CE delivery
 // annotation. It is for virtual network adapters that expose received ECN via
 // UDP ancillary data; normal PacketConn users should use ReadFrom.
-func (c *SimConn) ReadFromWithECN(p []byte) (n int, addr net.Addr, ecnMarked bool, err error) {
+func (c *SimConn) ReadFromWithECN(p []byte) (n int, addr net.Addr, ecnBits uint8, err error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return 0, nil, false, net.ErrClosed
+		return 0, nil, 0, net.ErrClosed
 	}
 	deadline := c.readDeadline
 	c.mu.Unlock()
 
 	if !deadline.IsZero() && !time.Now().Before(deadline) {
-		return 0, nil, false, ErrDeadlineExceeded
+		return 0, nil, 0, ErrDeadlineExceeded
 	}
 
 	var pkt Packet
@@ -189,21 +191,30 @@ func (c *SimConn) ReadFromWithECN(p []byte) (n int, addr net.Addr, ecnMarked boo
 	select {
 	case pkt = <-c.packetsToRead:
 	case <-c.closedChan:
-		return 0, nil, false, net.ErrClosed
+		return 0, nil, 0, net.ErrClosed
 	case <-c.deadlineUpdated:
 		return c.ReadFromWithECN(p)
 	case <-deadlineTimer:
-		return 0, nil, false, ErrDeadlineExceeded
+		return 0, nil, 0, ErrDeadlineExceeded
 	}
 
 	n = copy(p, pkt.Data)
 	// if the provided buffer is not enough to read the whole packet, we drop
 	// the rest of the data. this is similar to what `recvfrom` does on Linux
 	// and macOS.
-	return n, pkt.From, pkt.ECNMarked, nil
+	return n, pkt.From, pkt.ECNBits, nil
 }
 
 func (c *SimConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	return c.WriteToWithECN(p, addr, 0)
+}
+
+// WriteToWithECN is WriteTo plus the two IP ECN header bits. It allows the
+// deterministic link to preserve ECT markings and replace them with CE.
+func (c *SimConn) WriteToWithECN(p []byte, addr net.Addr, ecnBits uint8) (n int, err error) {
+	if ecnBits > 3 {
+		return 0, errors.New("simnet: invalid ECN bits")
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -220,9 +231,10 @@ func (c *SimConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	c.bytesSent.Add(int64(len(p)))
 
 	pkt := Packet{
-		From: c.myAddr,
-		To:   addr,
-		Data: slices.Clone(p),
+		From:    c.myAddr,
+		To:      addr,
+		Data:    slices.Clone(p),
+		ECNBits: ecnBits,
 	}
 	return len(p), c.router.SendPacket(pkt)
 }

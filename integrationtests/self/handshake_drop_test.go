@@ -165,15 +165,20 @@ func dropCallbackDropNthPacket(dir direction, ns ...int) func(direction, simnet.
 	}
 }
 
-func dropCallbackDropOneThird(_ direction) func(direction, simnet.Packet) bool {
+func dropCallbackDropOneThird(dir direction) func(direction, simnet.Packet) bool {
 	const maxSequentiallyDropped = 10
 	var mx sync.Mutex
 	var toClient, toServer int
+	rng := mrand.New(mrand.NewPCG(0, 0))
 	return func(d direction, p simnet.Packet) bool {
-		drop := mrand.IntN(3) == 0
-
+		if d != dir && dir != directionBoth {
+			return false
+		}
 		mx.Lock()
 		defer mx.Unlock()
+		// A fixed per-scenario generator makes the stress test independent of
+		// shuffled test order and of unrelated users of the package RNG.
+		drop := rng.IntN(3) == 0
 		// never drop more than 10 consecutive packets
 		if d == directionToClient || d == directionBoth {
 			if drop {
@@ -198,6 +203,16 @@ func dropCallbackDropOneThird(_ direction) func(direction, simnet.Packet) bool {
 			}
 		}
 		return drop
+	}
+}
+
+func TestDropCallbackOneThirdIsDirectionalAndDeterministic(t *testing.T) {
+	first := dropCallbackDropOneThird(directionToServer)
+	second := dropCallbackDropOneThird(directionToServer)
+	packet := simnet.Packet{Data: []byte("packet")}
+	for range 100 {
+		require.False(t, first(directionToClient, packet))
+		require.Equal(t, first(directionToServer, packet), second(directionToServer, packet))
 	}
 }
 

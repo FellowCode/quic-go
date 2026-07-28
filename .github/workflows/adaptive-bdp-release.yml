@@ -1,0 +1,95 @@
+name: AdaptiveBDP release gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions: read-all
+
+env:
+  GO_VERSION: "1.26.x"
+
+jobs:
+  core-race:
+    name: Core race (Linux amd64, CGO)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - run: go version
+      - name: Run AdaptiveBDP core race gate
+        run: go test -count=1 -race ./internal/congestion ./internal/ackhandler .
+
+  static-analysis:
+    name: Full static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - run: go vet ./...
+
+  full-repository:
+    name: Full repository (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - run: go test -count=1 ./...
+
+  adaptive-bdp-stress:
+    name: AdaptiveBDP stress (100 repetitions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - run: go test -count=100 ./internal/congestion -run AdaptiveBDP
+
+  deterministic-network:
+    name: Deterministic F14 network matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - run: go test -count=3 ./integrationtests/self -run TestAdaptiveBDPDeterministicLink
+
+  transition-soak:
+    name: AdaptiveBDP repeated-transition soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QUIC_GO_ADAPTIVE_BDP_SOAK_CYCLES: "25"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - name: Run capacity / RTT / loss / idle / migration soak
+        run: go test -count=1 -timeout=30m ./integrationtests/self -run ^TestAdaptiveBDPSoakRepeatedTransitions$

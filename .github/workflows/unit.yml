@@ -39,7 +39,7 @@ jobs:
           go test -c -cover -tags root -o quic-go.test .
           sudo ./quic-go.test -test.v -test.run "${TEST_NAMES%|}" -test.coverprofile coverage-root.txt 2>&1 | go-junit-report -set-exit-code -iocopy -package-name github.com/quic-go/quic-go -out report_root.xml
           rm quic-go.test
-      - name: Run tests with race detector
+      - name: Run shuffled tests
         if: ${{ matrix.os == 'ubuntu' }} # speed things up. Windows and OSX VMs are slow
         env:
           TIMESCALE_FACTOR: 20

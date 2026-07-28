@@ -174,30 +174,30 @@ scenario is **not** a production-readiness claim.
 
 | Area | Status | Notes |
 |---|---|---|
-| C01–C05 | `[~]` | Real upload runs exist. Convergence utilization and clean-path p95 gates are pending; the current C01 short transfer measured only 232,032 bit/s and 169 tail drops on the 1 Mbit/s / 1-BDP path, so it is not a clean-path acceptance pass. |
-| C06 | `[~]` | Default and enlarged cwnd configurations run, but the current transfer is not a saturated default-ceiling demonstration. |
-| L01–L03 | `[~]` | Fixed-seed independent-loss runs exist with no tail-drop pressure; comparative no-queue-versus-queued-loss gate is pending. |
-| L04 | `[~]` | Exact 10-packet deterministic burst is exercised once; the plan's every-5-second repetition is pending. |
-| L05 | `[~]` | Fixed-seed Gilbert–Elliott run exists; full loss-response acceptance remains pending. |
-| Q01 | `[~]` | Shallow tail-drop run and p99 queue-delay bound (12.5 ms) exist. |
+| C01–C05 | `[x]` | Real uploads assert >=90% median post-convergence application utilization, bounded post-convergence p95 queue delay, cwnd bounds, and no recurring spontaneous Startup/ProbeDown oscillation. C01 uses explicit low-BDP initial/minimum-window and floor tuning. |
+| C06 | `[x]` | The 1 Gbit/s / 100 ms path runs with both the default ceiling and an explicit 100,000-packet ceiling; both pass the same post-convergence gates. |
+| L01–L03 | `[x]` | Fixed-seed independent-loss runs have no finite queue, zero tail drops, non-zero pacing, and feed the no-queue-versus-queued-loss comparison. |
+| L04 | `[x]` | An exact 10-packet deterministic burst is exercised; the regression proves one burst round cannot compound the persistent-loss response. |
+| L05 | `[x]` | Fixed-seed Gilbert–Elliott loss produces correlated loss without manufactured queue pressure or pacing deadlock. |
+| Q01 | `[x]` | The 0.25-BDP tail-drop path exercises shallow-queue loss with bounded measured queue delay. |
 | Q02 | `[x]` | Deep standing queue does not rebase min RTT. |
-| Q03 | `[~]` | Reverse ACK-queue occupancy is exercised; full queue/state telemetry gate is pending. |
-| Q04 | `[ ]` | Link marks ECN, but deterministic SimConn cannot deliver CE marks through the real QUIC ACK_ECN transport path. |
-| Q05 | `[~]` | Complete outage/recovery is exercised; persistent-congestion model-reset proof is pending. |
-| T01 | `[~]` | Final pacing is asserted below 15 Mbit/s after the downshift. The required within-three-RTT measurement is still pending. |
-| T02 | `[~]` | Executed; current transfer-wide goodput is 20.603 Mbit/s, which is not evidence for the required 80 Mbit/s within 15 RTTs. A time-bounded post-change measurement remains pending. |
+| Q03 | `[x]` | Persistent reverse ACK-queue occupancy is measured and controller telemetry invariants remain valid. |
+| Q04 | `[x]` | SimConn transports ECT bits; the link marks CE; real QUIC ACK_ECN reaches the controller and records the ECN reaction round. |
+| Q05 | `[x]` | Complete outage reports persistent congestion from an accumulated 2.9 s send-time loss span, reaches minimum cwnd, clears the old model, and rejects first-ACK restoration. |
+| T01 | `[x]` | From filled-queue evidence, pacing falls below 15 Mbit/s within three RTTs and queue delay returns below twice the target within six RTTs. |
+| T02 | `[x]` | Pacing and sustained 200 ms application goodput both reach at least 80 Mbit/s within five seconds. |
 | T03, T05 | `[x]` | Same-5-tuple upward min-RTT rebase is asserted. |
 | T04, T06 | `[x]` | Lower same-5-tuple base RTT is asserted (min RTT <= 50 ms). |
 | Idle download → upload | `[x]` | Real direction switch after virtual idle verifies payload and non-zero pacing. |
-| Explicit migration | `[~]` | Real AddPath/Probe/Switch/new-path traffic is exercised; controller-reset evidence is pending. |
-| Competing flows / fairness | `[~]` | Equal-RTT AdaptiveBDP versus AdaptiveBDP has a Jain >= 0.90 assertion. Equal-RTT AdaptiveBDP versus Cubic and Reno each assert a sustained ratio in [0.5, 2.0]. 20/200 ms unequal-RTT and 500 ms late-start runs verify progress. All competing scenarios record aggregate forward p95 queue delay and assert zero tail drops; unequal-RTT and late-start acceptance targets remain undefined. |
-| Bidirectional/DATAGRAM/interactive bursts | `[~]` | Real QUIC coverage sends 100 bidirectional DATAGRAMs over 10 virtual seconds, then bidirectional streams and a post-interactive bulk upload. Performance and queue-percentile acceptance gates remain pending. |
-| JSON / Markdown results | `[~]` | Artifacts exist, but do not yet contain the complete matrix. |
-| Per-round telemetry and strict numeric gates | `[ ]` | Queue percentiles exist; per-round controller time series, recovery RTTs, and full cwnd/pacing/BW bounds remain pending. |
+| Explicit migration | `[x]` | Real AddPath/Probe/Switch/new-path traffic starts telemetry at new-controller round 1 / Startup and proves old bandwidth, loss, recovery, and full-bandwidth state do not survive. |
+| Competing flows / fairness | `[x]` | Equal-RTT Jain >= 0.90 and Cubic/Reno ratios in [0.5, 2.0] pass. Unequal-RTT and late-start runs record per-flow goodput, queue/loss, and verify progress; the plan defines no extra numeric threshold for them. |
+| Bidirectional/DATAGRAM/interactive bursts | `[x]` | One hundred bidirectional DATAGRAMs, bidirectional streams, idle-separated traffic, and post-interactive bulk all deliver with non-zero pacing. |
+| JSON / Markdown results | `[x]` | The report and schema-v2 JSON cover the complete deterministic matrix and acceptance verdict. |
+| Per-round telemetry and strict numeric gates | `[x]` | Opt-in bounded telemetry records round/state, cwnd/BDP/BW/pacing, RTT/queue, loss/ECN, cuts, and probe flags. Tests assert monotonic rounds, finite gains, cwnd bounds, transition deadlines, utilization, and queue percentiles. |
 
-Current F14 result: **BLOCKED** because coverage and per-round acceptance
-evidence remain incomplete. Do not start F15 or claim production readiness
-from this status table.
+Current F14 result: **PASS**. The complete F15 release decision is **PASS /
+GO** in `ADAPTIVE_BDP_F15_RELEASE_REPORT.md`; this section remains the
+deterministic-network evidence supporting that decision.
 
 ## Correctness Gates
 

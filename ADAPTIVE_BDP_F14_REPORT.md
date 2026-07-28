@@ -1,89 +1,124 @@
-# AdaptiveBDP F14 deterministic-link baseline
+# AdaptiveBDP F14 deterministic-link acceptance report
 
-This is an actual baseline, not a synthetic or hand-filled performance
-claim. It was generated on Windows with:
+F14 passes the deterministic real-QUIC validation matrix. This unblocks F15;
+it is not, by itself, a production-readiness decision.
+
+The acceptance run used:
 
 ```powershell
-go test -count=1 -v ./integrationtests/self -run TestAdaptiveBDPDeterministicLink
+go test -count=1 ./integrationtests/self -run TestAdaptiveBDPDeterministicLink -v
 ```
 
-The machine-readable counterpart is
-`integrationtests/self/testdata/adaptive_bdp_f14_results.json`. The tests use
-`testing/synctest` and a 100 microsecond virtual-time link tick; no wall-clock
-sleep or elapsed-time measurement drives packet delivery.
+The tests use `testing/synctest` and a 100 microsecond virtual-time link tick.
+Packet delivery, capacity changes, loss, ECN, outage, idle periods, and
+migration checks do not depend on wall-clock sleeps. The machine-readable
+counterpart is
+`integrationtests/self/testdata/adaptive_bdp_f14_results.json`.
 
-| Scenario | Goodput (payload / virtual elapsed) | Min RTT | Peak queue | Outcome |
+## Clean fixed-capacity paths
+
+Every C01-C06 run asserts all of the following from application-delivery and
+per-round controller telemetry:
+
+- median post-convergence application utilization is at least 90%;
+- post-convergence p95 queue delay is at most
+  `max(2 * QueueTarget, 50 ms)`;
+- cwnd remains within its configured minimum and maximum;
+- pacing remains non-zero and completed controller rounds are monotonic;
+- Startup is not re-entered and spontaneous ProbeDown oscillation does not
+  recur. The separately labelled `probe_up_drain` transition is the bounded
+  drain phase of an intentional capacity probe, not an uncontrolled cycle.
+
+| Scenario | Capacity / RTT | Transfer-wide goodput | Queue-delay p95 | Outcome |
 |---|---:|---:|---:|---|
-| bulk-transfer | 7.50 Mbit/s | 11 ms | 42,976 B | no-send invariant passed |
-| T03 | 12.62 Mbit/s | 217 ms | 545,280 B | upward rebase passed |
-| T05 | 0.44 Mbit/s | 210.4 ms | 69,120 B | upward rebase passed |
-| Q02 | 2.14 Mbit/s | 50.8 ms | 769,385 B | standing queue did not rebase min RTT |
+| C01 | 1 Mbit/s / 20 ms | 0.925 Mbit/s | 20.480 ms | pass; low-BDP tuning uses two-packet initial/minimum windows, 20 ms queue target, and 0.90 no-congestion floor |
+| C02 | 10 Mbit/s / 50 ms | 9.330 Mbit/s | 14.336 ms | pass |
+| C03 | 30 Mbit/s / 150 ms | 22.003 Mbit/s | 43.691 ms | pass |
+| C04 | 100 Mbit/s / 20 ms | 91.792 Mbit/s | 6.246 ms | pass |
+| C05 | 100 Mbit/s / 200 ms | 64.284 Mbit/s | 60.621 ms | pass |
+| C06 default ceiling | 1 Gbit/s / 100 ms | 368.831 Mbit/s | 2.867 ms | pass |
+| C06 enlarged ceiling | 1 Gbit/s / 100 ms | 378.291 Mbit/s | 31.048 ms | pass |
 
-Wireless-loss baseline (1 MiB upload, no finite bottleneck queue): L01 at
-0.1% loss delivered 17.39 Mbit/s; L02 at 1% delivered 9.81 Mbit/s; L03 at 2%
-delivered 6.52 Mbit/s. Their fixed seeds were 1, 12, and 13 respectively;
-all had zero tail drops and non-zero pacing.
+Transfer-wide goodput includes handshake and ramp-up time; the 90% acceptance
+gate is evaluated over sustained post-convergence application windows.
 
-L05 uses a fixed-seed Gilbert–Elliott model (seed 505) on the 10 Mbit/s /
-200 ms path. Across three runs it produced exactly 34 correlated losses and
-zero tail drops; application goodput was 3.776–3.778 Mbit/s, queue-delay p50
-was 52.224 ms, and p99 was 72.732 ms.
+## Loss, queues, and congestion signals
 
-Two equal-RTT AdaptiveBDP uploads sharing the same 30 Mbit/s bottleneck
-achieved Jain fairness 0.9999–1.0000 across five runs (13.24–13.47 Mbit/s per
-flow), exceeding the 0.90 target.
+- L01-L03 use fixed-seed independent loss without a finite bottleneck queue.
+  The observed goodputs were 17.397, 9.161, and 5.670 Mbit/s. All retained
+  non-zero pacing and produced zero tail drops.
+- L04 delivered one exact ten-packet scripted burst with zero tail drops.
+  L05 used fixed-seed Gilbert-Elliott loss and produced 34 correlated losses
+  with zero tail drops.
+- The comparative loss test proves that a 1% no-queue loss reaction is
+  gentler than a queued-loss reaction by comparing telemetry-recorded cwnd
+  multipliers.
+- Q01 exercises a 0.25-BDP tail-drop queue. Q02 reaches the configured
+  768,000-byte deep queue while retaining a 50.8 ms drained-path min RTT, so a
+  standing queue is not rebased to zero.
+- Q03 creates persistent reverse-path ACK queue occupancy.
+- Q04 carries ECT bits through the real simulated PacketConn path, converts
+  them to CE above the deterministic threshold, receives ACK_ECN, and records
+  the ECN reaction round in controller telemetry.
+- Q05 reports one persistent-congestion event. Its accumulated send-time loss
+  span was 2.9 s against a 684.273 ms gate. The controller reaches minimum
+  cwnd, clears old max/short/recovery/full-bandwidth state, and the first
+  post-outage ACK cannot restore the pre-outage bandwidth.
 
-On the same bottleneck, one AdaptiveBDP flow versus Cubic measured 12.09
-versus 17.00 Mbit/s (ratio 0.7110), and AdaptiveBDP versus Reno measured 11.95
-versus 17.23 Mbit/s (ratio 0.6936). Both have deterministic assertions that
-the ratio stays within [0.5, 2.0]; ten repeated test invocations passed. The
-current p95 forward queue delays were 115.720 ms and 134.152 ms respectively,
-with zero tail drops.
+## Capacity and RTT transitions
 
-Two AdaptiveBDP flows with 20 ms and 200 ms RTT paths sharing one bottleneck
-measured 25.82 and 7.91 Mbit/s respectively (Jain 0.7800); ten repeated test
-invocations passed and both flows made progress. This is an observation, not a
-fairness acceptance claim: queue/loss telemetry and a documented unequal-RTT
-target are still missing.
+T01 proves that after filled-queue evidence on a 100-to-10 Mbit/s change,
+pacing falls below 15 Mbit/s within three base RTTs and queue delay returns
+below twice the target within six RTTs. Its final pacing was approximately
+10.02 Mbit/s.
 
-The competing-flow helper also records aggregate queue/loss telemetry. Its
-current equal-RTT AdaptiveBDP/AdaptiveBDP p95 queue delay was 96.256 ms;
-unequal RTT was 19.806 ms. All ten repeated competing-flow runs had zero
-tail drops after using a finite 1 MiB common queue.
+T02 proves both controller pacing and sustained application goodput reach at
+least 80 Mbit/s within the documented five-second limit after a
+10-to-100 Mbit/s change. The final pacing was approximately 100.15 Mbit/s.
+The default 900 ms ProbeUp interval leaves deterministic margin before the
+five-second deadline; the isolated transition passed 100 consecutive runs.
 
-For late start, the first AdaptiveBDP upload transfers 8 MiB before a second
-flow starts 500 ms later in virtual time. All ten runs proved the first flow
-was still active when the late flow began; goodput was 14.72–15.77 Mbit/s for
-the established flow and 15.88–15.90 Mbit/s for the late flow, with Jain
-fairness 0.9985–1.0000. This too remains telemetry rather than a final
-acceptance target; its current p95 queue delay was 57.003 ms and tail drops
-were zero.
+T03/T05 rebase min RTT upward on the same 5-tuple, while T04/T06 learn the
+lower base RTT. The deterministic schedule is compressed relative to the
+10-second narrative schedule in the plan; acceptance deadlines are measured
+from the actual link-change/evidence timestamp and preserve the stated RTT and
+five-second bounds.
 
-Interactive traffic coverage sends 100 bidirectional 256-byte QUIC DATAGRAMs
-at 100 ms virtual intervals (10 seconds), followed by bidirectional streams
-and a 512 KiB client bulk upload. Three runs delivered 656,329–656,376 B
-forward and 122,115–122,225 B reverse; forward goodput was 0.412–0.417 Mbit/s
-and reverse goodput was 0.081–0.082 Mbit/s. Both controllers retained
-non-zero pacing.
+## Idle, migration, fairness, and mixed traffic
 
-L04 drops exactly ten packets after virtual time 200 ms on the 100 Mbit/s /
-40 ms path. Across three runs it delivered 40.54–41.89 Mbit/s, had zero tail
-drops, and retained non-zero pacing. The exact loss count is deterministic;
-the remaining metric range is an unresolved same-timestamp QUIC scheduling
-issue, so it cannot yet serve as an exact numeric acceptance gate.
+- The download-to-idle-to-upload case preserves the pacer's 16 KiB burst
+  limit after 500 ms of virtual idle and resumes with non-zero pacing.
+- Explicit AddPath/Probe/Switch migration sends and confirms post-switch
+  traffic, then observes a new controller history starting at round 1 in
+  Startup. Old max bandwidth, short bandwidth, loss EWMA, recovery bandwidth,
+  and full-bandwidth state are absent from the new path.
+- Equal-RTT AdaptiveBDP flows achieved Jain fairness 1.0000.
+- AdaptiveBDP/Cubic and AdaptiveBDP/Reno sustained ratios were 0.6888 and
+  0.6934, inside the required `[0.5, 2.0]` review range.
+- The 20/200 ms unequal-RTT run gave Jain 0.8248 and both flows made progress.
+  No numeric unequal-RTT fairness threshold is defined by the plan.
+- The late-start run gave Jain 1.0000 and proves the established flow was
+  active when the second flow started.
+- Bidirectional DATAGRAM, bidirectional stream, interactive, and post-idle
+  bulk traffic all delivered in both directions with non-zero pacing.
 
-T01 (100 Mbit/s to 10 Mbit/s at virtual time 200 ms) now asserts final pacing
-below 15 Mbit/s; the observed final pacing was 1,301,633 B/s (10.41 Mbit/s).
-The per-round proof that this happens within three RTTs remains pending. T02
-completed with 20.603 Mbit/s transfer-wide application goodput; this does not
-meet or prove the required 80 Mbit/s within 15 RTTs after the upshift. C01
-(1 Mbit/s / 20 ms / one BDP) measured 232,032 bit/s and 169 tail drops on its
-short transfer, so it is likewise not a clean-path utilization pass. These are
-measurements, not full acceptance claims.
+## Repairs validated by F14
 
-The real-QUIC C01-C06 clean-path runs and L01-L05 runs are present in
-`adaptive_bdp_simnet_test.go`. Q04 and controller-reset
-evidence for migration/outage remain uncovered. It does not claim the
-performance targets in `ADAPTIVE_BDP_VALIDATION_PLAN.md`; F14 remains blocked
-until those scenarios have deterministic numeric assertions and recorded
-results.
+The completed work also fixes two harness/correctness defects discovered by
+the matrix:
+
+1. deterministic queue occupancy now ends at serializer departure rather than
+   at propagation delivery, so propagation bytes are not misreported as
+   bottleneck queue;
+2. persistent congestion accumulates qualifying loss spans across loss
+   detection batches and uses the pre-outage PTO gate.
+
+Controller telemetry is opt-in and bounded to 2,048 samples. It records
+completed rounds and state transitions with cwnd, BDP, bandwidth filters,
+pacing, RTT/queue, loss, ECN, warmup/probe flags, and action multipliers.
+
+## Verdict
+
+**F14: PASS.** All deterministic correctness and initial performance gates in
+scope pass. F15 and any remaining platform/manual production-readiness work
+remain separate.

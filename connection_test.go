@@ -51,6 +51,15 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 			ok: true,
 			info: congestion.AdaptiveBDPDebugInfo{
 				State: "ProbeBW",
+				Telemetry: []congestion.AdaptiveBDPTelemetrySample{{
+					Event:            "round",
+					Elapsed:          250 * time.Millisecond,
+					RoundCount:       41,
+					State:            "ProbeBW",
+					TransitionReason: "drain_complete",
+					CongestionWindow: 1200,
+					FullBwReached:    true,
+				}},
 
 				CongestionWindow: 1234,
 				TargetCwnd:       2345,
@@ -90,29 +99,37 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 				NoQueueLowRounds:               4,
 				NoQueueLowAcked:                8192,
 
-				LossRatioRound:              0.02,
-				LossRatioEWMA:               0.015,
-				LostBytesThisRound:          2560,
-				AckedBytesThisRound:         125_440,
-				LossMinBytes:                2560,
-				EmergencyLossMinBytes:       10_240,
-				MinLossSampleBytes:          65_536,
-				LossGraceRatio:              0.01,
-				LossSevereThreshold:         0.05,
-				EmergencyLossThreshold:      0.10,
-				QueuePressure:               0.5,
-				MildLossRounds:              2,
-				LastLossActionReason:        "proportional_loss_cutback",
-				LastLossCwndMultiplier:      0.98,
-				LastLossPacingMultiplier:    0.99,
-				LastLossCutbackRound:        41,
-				SuppressProbeUpUntilRound:   43,
-				SuppressProbeUpReason:       "proportional_loss_no_queue",
-				LossFreeRounds:              3,
-				LastMaterialLossRound:       39,
-				LossRecoveryProbeActive:     true,
-				LossRecoveryProbeBW:         1_750_000,
-				LossRecoveryProbeUntilRound: 44,
+				LossRatioRound:               0.02,
+				LossRatioEWMA:                0.015,
+				LostBytesThisRound:           2560,
+				AckedBytesThisRound:          125_440,
+				LossMinBytes:                 2560,
+				EmergencyLossMinBytes:        10_240,
+				MinLossSampleBytes:           65_536,
+				LossGraceRatio:               0.01,
+				LossSevereThreshold:          0.05,
+				EmergencyLossThreshold:       0.10,
+				QueuePressure:                0.5,
+				MildLossRounds:               2,
+				LastLossActionReason:         "proportional_loss_cutback",
+				LastLossCwndMultiplier:       0.98,
+				LastLossPacingMultiplier:     0.99,
+				LastLossCutbackRound:         41,
+				SuppressProbeUpUntilRound:    43,
+				SuppressProbeUpReason:        "proportional_loss_no_queue",
+				LossFreeRounds:               3,
+				LastMaterialLossRound:        39,
+				LossRecoveryProbeActive:      true,
+				LossRecoveryProbeBW:          1_750_000,
+				LossRecoveryProbeUntilRound:  44,
+				HasLastECNCE:                 true,
+				LastECNCERound:               40,
+				PersistentCongestionEvents:   2,
+				LastPersistentCongestionSpan: 3 * time.Second,
+				LastPersistentCongestionGate: 600 * time.Millisecond,
+				MaxOutstandingSentPackets:    12_000,
+				MaxTrackedSentPackets:        15_000,
+				TrackedSentPackets:           1_500,
 
 				RoundCount:         42,
 				RoundStart:         true,
@@ -135,6 +152,11 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 	info, ok := c.AdaptiveBDPDebugInfo()
 	require.True(t, ok)
 	require.Equal(t, "ProbeBW", info.State)
+	require.Len(t, info.Telemetry, 1)
+	require.Equal(t, "round", info.Telemetry[0].Event)
+	require.Equal(t, 250*time.Millisecond, info.Telemetry[0].Elapsed)
+	require.Equal(t, uint64(1200), info.Telemetry[0].CongestionWindow)
+	require.True(t, info.Telemetry[0].FullBwReached)
 	require.Equal(t, uint64(1234), info.CongestionWindow)
 	require.Equal(t, uint64(2345), info.TargetCwnd)
 	require.Equal(t, uint64(1_000_000), info.BandwidthBytesPerSecond)
@@ -175,6 +197,14 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 	require.True(t, info.LossRecoveryProbeActive)
 	require.Equal(t, uint64(1_750_000), info.LossRecoveryProbeBW)
 	require.Equal(t, uint64(44), info.LossRecoveryProbeUntilRound)
+	require.True(t, info.HasLastECNCE)
+	require.Equal(t, uint64(40), info.LastECNCERound)
+	require.Equal(t, uint64(2), info.PersistentCongestionEvents)
+	require.Equal(t, 3*time.Second, info.LastPersistentCongestionSpan)
+	require.Equal(t, 600*time.Millisecond, info.LastPersistentCongestionGate)
+	require.Equal(t, uint64(12_000), info.MaxOutstandingSentPackets)
+	require.Equal(t, uint64(15_000), info.MaxTrackedSentPackets)
+	require.Equal(t, uint64(1_500), info.TrackedSentPackets)
 	require.Equal(t, uint64(42), info.RoundCount)
 	require.Equal(t, lastRoundStart.ToTime(), info.LastRoundStartTime)
 	require.Equal(t, uint64(1280), info.PacerBudget)
@@ -196,6 +226,7 @@ func TestAdaptiveBDPDebugInfoPublicAPIReturnsFalseWhenUnavailable(t *testing.T) 
 func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
 	cfg := toCongestionCwndTuningConfig(CwndTuning{
 		Algorithm:                        CongestionControlAdaptiveBDP,
+		EnableAdaptiveBDPTelemetry:       true,
 		LossGraceRatio:                   0.01,
 		LossSoftThreshold:                0.015,
 		LossSevereThreshold:              0.05,
@@ -223,6 +254,7 @@ func TestCwndTuningLossKnobsMapToCongestionConfig(t *testing.T) {
 	})
 
 	require.Equal(t, congestion.CongestionControlAdaptiveBDP, cfg.Algorithm)
+	require.True(t, cfg.EnableAdaptiveBDPTelemetry)
 	require.Equal(t, 0.01, cfg.LossGraceRatio)
 	require.Equal(t, 0.015, cfg.LossSoftThreshold)
 	require.Equal(t, 0.05, cfg.LossSevereThreshold)
