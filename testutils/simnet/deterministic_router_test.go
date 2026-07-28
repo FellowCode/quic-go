@@ -91,9 +91,9 @@ func TestDeterministicRouterPreservesECNMarkForSimConnAdapter(t *testing.T) {
 	require.NoError(t, err)
 	router.AdvanceTo(2 * time.Millisecond)
 	buf := make([]byte, 16)
-	n, from, marked, err := server.ReadFromWithECN(buf)
+	n, from, ecnBits, err := server.ReadFromWithECN(buf)
 	require.NoError(t, err)
 	require.Equal(t, []byte("ecn"), buf[:n])
 	require.Equal(t, clientAddr.String(), from.String())
-	require.True(t, marked)
+	require.Equal(t, uint8(3), ecnBits)
 }

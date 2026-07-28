@@ -387,7 +387,12 @@ func testHTTP3ListenerClosing(t *testing.T, graceful, useApplicationListener boo
 		w.WriteHeader(http.StatusOK)
 	})
 	handlerChan := make(chan struct{})
+	handlerStarted := make(chan struct{}, 1)
 	mux.HandleFunc("/long", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case handlerStarted <- struct{}{}:
+		default:
+		}
 		<-handlerChan
 		w.WriteHeader(http.StatusOK)
 	})
@@ -440,7 +445,11 @@ func testHTTP3ListenerClosing(t *testing.T, graceful, useApplicationListener boo
 			defer cancel()
 			longReqChan <- dial(t, ctx, u)
 		}()
-		time.Sleep(scaleDuration(10 * time.Millisecond))
+		select {
+		case <-handlerStarted:
+		case <-time.After(time.Second):
+			t.Fatal("long request handler did not start")
+		}
 
 		go func() { shutdownChan <- server.Shutdown(context.Background()) }()
 	} else {

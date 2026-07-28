@@ -77,7 +77,9 @@ func (r *DeterministicRouter) AdvanceTo(atDuration time.Duration) []DeliveredPac
 			continue
 		}
 		packet := event.Packet
-		packet.ECNMarked = event.ECNMarked
+		if event.ECNMarked {
+			packet.ECNBits = 3
+		}
 		receiver.RecvPacket(packet)
 	}
 	return delivered

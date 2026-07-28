@@ -63,17 +63,18 @@ type DeterministicLinkConfig struct {
 
 // LinkCounters are per-direction simulated-link counters.
 type LinkCounters struct {
-	SubmittedPackets uint64
-	SubmittedBytes   uint64
-	DeliveredPackets uint64
-	DeliveredBytes   uint64
-	RandomLosses     uint64
-	ScriptedLosses   uint64
-	TailDrops        uint64
-	ECNMarks         uint64
-	Duplicates       uint64
-	Reordered        uint64
-	PeakQueueBytes   uint64
+	SubmittedPackets           uint64
+	SubmittedBytes             uint64
+	DeliveredPackets           uint64
+	DeliveredBytes             uint64
+	RandomLosses               uint64
+	ScriptedLosses             uint64
+	TailDrops                  uint64
+	ECNMarks                   uint64
+	Duplicates                 uint64
+	Reordered                  uint64
+	PeakQueueBytes             uint64
+	PeakSameTimeSubmittedBytes uint64
 }
 
 // DeliveredPacket is emitted by AdvanceTo for every packet that reaches the
@@ -99,17 +100,22 @@ type deterministicDirectionState struct {
 	packets          uint64
 	lossBurstPackets uint64
 	gilbertBad       bool
+	lastSubmitTime   time.Duration
+	sameTimeBytes    uint64
+	hasSubmitTime    bool
 	counters         LinkCounters
 }
 
 type deterministicDelivery struct {
 	deliveredAt time.Duration
+	departedAt  time.Duration
 	order       uint64
 	direction   LinkDirection
 	packet      Packet
 	ecnMarked   bool
 	duplicate   bool
 	queueBytes  uint64
+	dequeued    bool
 }
 
 type scheduledPacket struct {
@@ -220,6 +226,14 @@ func (l *DeterministicLink) send(direction LinkDirection, packet Packet) (accept
 	s.applyChanges(l.now)
 	s.counters.SubmittedPackets++
 	s.counters.SubmittedBytes += uint64(len(packet.Data))
+	if s.hasSubmitTime && s.lastSubmitTime == l.now {
+		s.sameTimeBytes += uint64(len(packet.Data))
+	} else {
+		s.lastSubmitTime = l.now
+		s.sameTimeBytes = uint64(len(packet.Data))
+		s.hasSubmitTime = true
+	}
+	s.counters.PeakSameTimeSubmittedBytes = max(s.counters.PeakSameTimeSubmittedBytes, s.sameTimeBytes)
 	if s.lossBurstPackets > 0 {
 		s.lossBurstPackets--
 		s.counters.ScriptedLosses++
@@ -264,6 +278,7 @@ func (l *DeterministicLink) send(direction LinkDirection, packet Packet) (accept
 	ecnMarked = s.config.ECNThresholdBytes > 0 && packetBytes >= s.config.ECNThresholdBytes-saturatingMin(s.queueBytes, s.config.ECNThresholdBytes)
 	if ecnMarked {
 		s.counters.ECNMarks++
+		packet.ECNBits = 3
 	}
 
 	s.packets++
@@ -280,6 +295,7 @@ func (l *DeterministicLink) send(direction LinkDirection, packet Packet) (accept
 	}
 	l.addDelivery(deterministicDelivery{
 		deliveredAt: deliveryAt,
+		departedAt:  finish,
 		direction:   direction,
 		packet:      clonePacket(packet),
 		ecnMarked:   ecnMarked,
@@ -289,6 +305,7 @@ func (l *DeterministicLink) send(direction LinkDirection, packet Packet) (accept
 		s.counters.Duplicates++
 		l.addDelivery(deterministicDelivery{
 			deliveredAt: deliveryAt,
+			departedAt:  finish,
 			direction:   direction,
 			packet:      clonePacket(packet),
 			ecnMarked:   ecnMarked,
@@ -310,6 +327,7 @@ func (l *DeterministicLink) AdvanceTo(at time.Duration) []DeliveredPacket {
 	for len(l.scheduled) > 0 && l.scheduled[0].at <= at {
 		event := l.scheduled[0]
 		l.scheduled = l.scheduled[1:]
+		l.advanceQueueDepartures(event.at)
 		l.now = event.at
 		for i := range l.directions {
 			l.directions[i].applyChanges(l.now)
@@ -325,6 +343,7 @@ func (l *DeterministicLink) AdvanceTo(at time.Duration) []DeliveredPacket {
 	for i := range l.directions {
 		l.directions[i].applyChanges(l.now)
 	}
+	l.advanceQueueDepartures(at)
 	n := 0
 	for n < len(l.deliveries) && l.deliveries[n].deliveredAt <= at {
 		n++
@@ -334,10 +353,6 @@ func (l *DeterministicLink) AdvanceTo(at time.Duration) []DeliveredPacket {
 	result := make([]DeliveredPacket, 0, len(ready))
 	for _, d := range ready {
 		s := l.direction(d.direction)
-		if d.queueBytes > s.queueBytes {
-			panic("simnet: deterministic link queue accounting underflow")
-		}
-		s.queueBytes -= d.queueBytes
 		s.counters.DeliveredPackets++
 		s.counters.DeliveredBytes += uint64(len(d.packet.Data))
 		result = append(result, DeliveredPacket{Direction: d.direction, Packet: d.packet, At: d.deliveredAt, ECNMarked: d.ecnMarked, Duplicate: d.duplicate})
@@ -345,8 +360,24 @@ func (l *DeterministicLink) AdvanceTo(at time.Duration) []DeliveredPacket {
 	return result
 }
 
+func (l *DeterministicLink) advanceQueueDepartures(at time.Duration) {
+	for i := range l.deliveries {
+		d := &l.deliveries[i]
+		if d.dequeued || d.queueBytes == 0 || d.departedAt > at {
+			continue
+		}
+		s := l.direction(d.direction)
+		if d.queueBytes > s.queueBytes {
+			panic("simnet: deterministic link queue accounting underflow")
+		}
+		s.queueBytes -= d.queueBytes
+		d.dequeued = true
+	}
+}
+
 // QueueBytes returns the current per-direction occupancy, including packets
-// that have finished serialization but have not yet reached the receiver.
+// waiting for or currently undergoing bottleneck serialization. Propagating
+// packets that already left the bottleneck are not part of queue occupancy.
 func (l *DeterministicLink) QueueBytes(direction LinkDirection) uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -367,6 +398,17 @@ func (l *DeterministicLink) Counters(direction LinkDirection) LinkCounters {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.direction(direction).counters
+}
+
+// ResetBurstPeak starts a new same-virtual-timestamp burst measurement for a
+// direction without changing packet, byte, loss, or queue counters.
+func (l *DeterministicLink) ResetBurstPeak(direction LinkDirection) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := l.direction(direction)
+	s.counters.PeakSameTimeSubmittedBytes = 0
+	s.sameTimeBytes = 0
+	s.hasSubmitTime = false
 }
 
 func (l *DeterministicLink) addDelivery(d deterministicDelivery) {

@@ -1,197 +1,294 @@
 {
-  "schema_version": 1,
-  "command": "go test -count=1 -v ./integrationtests/self -run TestAdaptiveBDPDeterministicLink",
+  "schema_version": 2,
+  "source_revision": "2ea2711c+working-tree",
+  "generated_at": "2026-07-28",
+  "command": "go test -count=1 ./integrationtests/self -run TestAdaptiveBDPDeterministicLink -v",
   "clock": "testing/synctest virtual time; deterministic link tick 100us",
+  "verdict": "pass",
+  "production_readiness_claim": false,
+  "acceptance": {
+    "clean_post_convergence_median_utilization_at_least_90_percent": true,
+    "clean_post_convergence_queue_p95_bounded": true,
+    "clean_no_recurring_spontaneous_startup_or_probe_down_oscillation": true,
+    "capacity_downshift_deadline": true,
+    "capacity_upshift_deadline": true,
+    "no_queue_loss_reaction_gentler_than_queued_loss": true,
+    "persistent_congestion_resets_model": true,
+    "idle_restart_burst_bounded": true,
+    "migration_resets_controller": true,
+    "equal_rtt_jain_at_least_0_90": true,
+    "cubic_and_reno_ratio_inside_0_5_to_2_0": true,
+    "telemetry_invariants": true
+  },
   "results": [
     {
-      "scenario": "bulk-transfer",
-      "elapsed": "104.9ms",
-      "delivered_bytes": 104550,
-      "submitted_bytes": 104550,
-      "peak_queue_bytes": 42976,
-      "min_rtt": "11ms",
-      "cwnd_bytes": 21760,
-      "pacing_bytes_per_second": 1303405,
-      "bandwidth_bytes_per_second": 1253877
-    },
-    {
       "scenario": "C01",
+      "status": "pass",
       "capacity_bits_per_second": 1000000,
       "base_rtt": "20ms",
       "queue": "1 BDP",
-      "transfer_goodput_bits_per_second": 232032,
-      "tail_drops": 169,
-      "queue_delay_p95": "10.24ms",
-      "acceptance_note": "This short transfer does not meet the 90% clean-path utilization target."
+      "elapsed": "18.1346s",
+      "transfer_goodput_bits_per_second": 925149,
+      "queue_delay_p95": "20.48ms",
+      "tail_drops": 19,
+      "tuning": {
+        "initial_window_packets": 2,
+        "min_window_packets": 2,
+        "queue_target": "20ms",
+        "no_congestion_rate_floor_fraction": 0.9
+      }
     },
     {
-      "scenario": "T03",
-      "elapsed": "2.6585s",
-      "delivered_bytes": 4296402,
-      "submitted_bytes": 4296492,
-      "peak_queue_bytes": 545280,
-      "min_rtt": "217ms",
-      "cwnd_bytes": 1223680,
-      "pacing_bytes_per_second": 3899917,
-      "bandwidth_bytes_per_second": 3751724
+      "scenario": "C02",
+      "status": "pass",
+      "capacity_bits_per_second": 10000000,
+      "base_rtt": "50ms",
+      "elapsed": "3.5964s",
+      "transfer_goodput_bits_per_second": 9330005,
+      "queue_delay_p95": "14.336ms"
+    },
+    {
+      "scenario": "C03",
+      "status": "pass",
+      "capacity_bits_per_second": 30000000,
+      "base_rtt": "150ms",
+      "elapsed": "3.05s",
+      "transfer_goodput_bits_per_second": 22002906,
+      "queue_delay_p95": "43.690667ms"
+    },
+    {
+      "scenario": "C04",
+      "status": "pass",
+      "capacity_bits_per_second": 100000000,
+      "base_rtt": "20ms",
+      "elapsed": "1.4622s",
+      "transfer_goodput_bits_per_second": 91791634,
+      "queue_delay_p95": "6.2464ms"
+    },
+    {
+      "scenario": "C05",
+      "status": "pass",
+      "capacity_bits_per_second": 100000000,
+      "base_rtt": "200ms",
+      "elapsed": "4.1758s",
+      "transfer_goodput_bits_per_second": 64283599,
+      "queue_delay_p95": "60.6208ms"
+    },
+    {
+      "scenario": "C06-default",
+      "status": "pass",
+      "capacity_bits_per_second": 1000000000,
+      "base_rtt": "100ms",
+      "elapsed": "1.4556s",
+      "transfer_goodput_bits_per_second": 368831349,
+      "queue_delay_p95": "2.8672ms",
+      "max_window_packets": "default"
+    },
+    {
+      "scenario": "C06-large-cwnd",
+      "status": "pass",
+      "capacity_bits_per_second": 1000000000,
+      "base_rtt": "100ms",
+      "elapsed": "1.4192s",
+      "transfer_goodput_bits_per_second": 378291228,
+      "queue_delay_p95": "31.04768ms",
+      "max_window_packets": 100000
     },
     {
       "scenario": "L01",
+      "status": "pass",
       "seed": 1,
-      "elapsed": "482.3ms",
-      "application_goodput_bits_per_second": 17392925,
-      "min_rtt": "50.3ms",
-      "peak_queue_bytes": 151040,
-      "tail_drops": 0,
-      "cwnd_bytes": 252160,
-      "pacing_bytes_per_second": 3903899
+      "independent_loss_probability": 0.001,
+      "application_goodput_bits_per_second": 17396532,
+      "random_losses": 1,
+      "tail_drops": 0
     },
     {
       "scenario": "L02",
+      "status": "pass",
       "seed": 12,
-      "elapsed": "855.2ms",
-      "application_goodput_bits_per_second": 9808942,
-      "min_rtt": "100.2ms",
-      "peak_queue_bytes": 177920,
-      "tail_drops": 0,
-      "cwnd_bytes": 561920,
-      "pacing_bytes_per_second": 3497999
+      "independent_loss_probability": 0.01,
+      "application_goodput_bits_per_second": 9160869,
+      "random_losses": 8,
+      "tail_drops": 0
     },
     {
       "scenario": "L03",
+      "status": "pass",
       "seed": 13,
-      "elapsed": "1.2863s",
-      "application_goodput_bits_per_second": 6521501,
-      "min_rtt": "150.2ms",
-      "peak_queue_bytes": 218744,
-      "tail_drops": 0,
-      "cwnd_bytes": 625116,
-      "pacing_bytes_per_second": 3706852
+      "independent_loss_probability": 0.02,
+      "application_goodput_bits_per_second": 5669510,
+      "random_losses": 22,
+      "tail_drops": 0
     },
     {
       "scenario": "L04",
-      "loss_model": "2ms deterministic burst at 200ms",
+      "status": "pass",
+      "loss_model": "exact deterministic burst",
       "scripted_loss_packets": 10,
-      "repeated_runs": 3,
-      "virtual_elapsed_range": ["400.5ms", "413.8ms"],
-      "application_goodput_bits_per_second_range": [40544262, 41890676],
-      "min_rtt_range": ["40.2ms", "40.3ms"],
-      "peak_queue_bytes_range": [323840, 656640],
       "tail_drops": 0,
-      "pacing_bytes_per_second_range": [12993750, 15468750]
+      "application_goodput_bits_per_second": 40242782
     },
     {
       "scenario": "L05",
+      "status": "pass",
       "seed": 505,
       "loss_model": "Gilbert-Elliott",
       "correlated_losses": 34,
       "tail_drops": 0,
-      "application_goodput_bits_per_second_range": [3776610, 3778482],
-      "queue_delay_p50": "52.224ms",
-      "queue_delay_p95_range": ["70.6816ms", "71.7048ms"],
-      "queue_delay_p99": "72.732ms",
-      "cwnd_bytes": 259840,
-      "pacing_bytes_per_second_range": [802781, 804387]
+      "application_goodput_bits_per_second": 3745917
     },
     {
-      "scenario": "two_adaptive_bdp_equal_rtt",
-      "flow_goodput_bits_per_second_range": [13235418, 13469184],
-      "jain_fairness_min": 0.9999,
-      "queue_delay_p95": "96.256ms",
-      "tail_drops": 0,
-      "acceptance_jain_minimum": 0.9
+      "scenario": "loss-reaction-comparison",
+      "status": "pass",
+      "no_queue_random_losses": 23,
+      "queued_tail_drops": 790,
+      "no_queue_cwnd_multiplier_greater_than_queued": true
     },
     {
-      "scenario": "adaptive_bdp_vs_cubic_equal_rtt",
-      "adaptive_bdp_goodput_bits_per_second": 12087331,
-      "cubic_goodput_bits_per_second": 17001638,
-      "adaptive_bdp_to_cubic_ratio": 0.7110,
-      "queue_delay_p95": "115.719734ms",
-      "tail_drops": 0,
-      "asserted_ratio_range": [0.5, 2.0],
-      "repeated_test_invocations": 10
-    },
-    {
-      "scenario": "adaptive_bdp_vs_reno_equal_rtt",
-      "adaptive_bdp_goodput_bits_per_second": 11949584,
-      "reno_goodput_bits_per_second": 17228605,
-      "adaptive_bdp_to_reno_ratio": 0.6936,
-      "queue_delay_p95": "134.151734ms",
-      "tail_drops": 0,
-      "asserted_ratio_range": [0.5, 2.0],
-      "repeated_test_invocations": 10
-    },
-    {
-      "scenario": "two_adaptive_bdp_unequal_rtt",
-      "rtt_milliseconds": [20, 200],
-      "flow_goodput_bits_per_second": [25819046, 7908558],
-      "jain_fairness": 0.7800,
-      "queue_delay_p95": "19.8056ms",
-      "tail_drops": 0,
-      "progress_asserted": true,
-      "repeated_test_invocations": 10,
-      "acceptance_note": "No unequal-RTT fairness threshold is defined yet; queue and loss telemetry are pending."
-    },
-    {
-      "scenario": "two_adaptive_bdp_late_start",
-      "late_start_delay": "500ms",
-      "payload_bytes_per_flow": 8388608,
-      "first_flow_active_when_late_flow_started": true,
-      "established_flow_goodput_bits_per_second_range": [14721376, 15773990],
-      "late_flow_goodput_bits_per_second_range": [15875113, 15899184],
-      "jain_fairness_range": [0.9985, 1.0],
-      "queue_delay_p95": "57.002667ms",
-      "tail_drops": 0,
-      "repeated_test_invocations": 10,
-      "acceptance_note": "Both flows are asserted to make progress; an unequal-RTT/late-start performance acceptance target is pending."
-    },
-    {
-      "scenario": "interactive_datagram_bidirectional_bulk",
-      "interactive_datagrams_per_direction": 100,
-      "interactive_datagram_bytes": 256,
-      "interactive_interval": "100ms",
-      "virtual_elapsed_range": ["10.557s", "10.6821s"],
-      "forward_delivered_bytes_range": [656329, 656376],
-      "reverse_delivered_bytes_range": [122115, 122225],
-      "forward_goodput_bits_per_second_range": [411820, 416700],
-      "reverse_goodput_bits_per_second_range": [80523, 81477],
-      "bidirectional_stream_payload_bytes": [81920, 81920],
-      "post_interactive_bulk_payload_bytes": 524288,
-      "non_zero_pacing_asserted": true,
-      "repeated_test_invocations": 3,
-      "acceptance_note": "Payload delivery is asserted; queue-percentile and performance acceptance gates are pending."
-    },
-    {
-      "scenario": "T05",
-      "elapsed": "19.0109s",
-      "delivered_bytes": 1082121,
-      "submitted_bytes": 1082121,
-      "peak_queue_bytes": 69120,
-      "min_rtt": "210.4ms",
-      "cwnd_bytes": 5120,
-      "pacing_bytes_per_second": 6250000,
-      "bandwidth_bytes_per_second": 249937
-    },
-    {
-      "scenario": "T02",
-      "initial_path": "10 Mbit/s / 30ms",
-      "changed_path": "100 Mbit/s / 30ms",
-      "change_time": "200ms",
-      "transfer_goodput_bits_per_second": 20603237,
-      "queue_delay_p95": "21.504ms",
-      "tail_drops": 0,
-      "acceptance_note": "Transfer-wide goodput is not a time-bounded proof of the 80 Mbit/s within-15-RTT target."
+      "scenario": "Q01",
+      "status": "pass",
+      "queue": "0.25 BDP tail drop",
+      "tail_drops": 135,
+      "queue_delay_p95": "11.946667ms"
     },
     {
       "scenario": "Q02",
-      "elapsed": "15.6733s",
-      "delivered_bytes": 5064759,
-      "submitted_bytes": 5064759,
-      "peak_queue_bytes": 769385,
+      "status": "pass",
+      "queue": "4 BDP tail drop",
+      "peak_queue_bytes": 768000,
       "min_rtt": "50.8ms",
-      "cwnd_bytes": 2560,
-      "pacing_bytes_per_second": 6250000,
-      "bandwidth_bytes_per_second": 1024872
+      "standing_queue_rebased_as_min_rtt": false
+    },
+    {
+      "scenario": "Q03",
+      "status": "pass",
+      "persistent_reverse_ack_queue_observed": true,
+      "reverse_peak_queue_bytes": 1964
+    },
+    {
+      "scenario": "Q04",
+      "status": "pass",
+      "ect_transported": true,
+      "ce_marked": true,
+      "ack_ecn_received": true,
+      "controller_ecn_round_recorded": true
+    },
+    {
+      "scenario": "Q05",
+      "status": "pass",
+      "persistent_congestion_events": 1,
+      "loss_span": "2.9s",
+      "pto_gate": "684.273ms",
+      "old_model_cleared": true,
+      "first_post_outage_ack_restored_old_bandwidth": false
+    },
+    {
+      "scenario": "T01",
+      "status": "pass",
+      "change": "100 Mbit/s to 10 Mbit/s",
+      "pacing_below_15_mbit_within_3_rtt": true,
+      "queue_below_2x_target_within_6_rtt": true,
+      "final_pacing_bytes_per_second": 1252596
+    },
+    {
+      "scenario": "T02",
+      "status": "pass",
+      "change": "10 Mbit/s to 100 Mbit/s",
+      "pacing_at_least_80_mbit_within_5_seconds": true,
+      "sustained_application_goodput_at_least_80_mbit_within_5_seconds": true,
+      "final_pacing_bytes_per_second": 12518200
+    },
+    {
+      "scenario": "T03",
+      "status": "pass",
+      "same_5_tuple": true,
+      "min_rtt_rebased_upward": true,
+      "observed_min_rtt": "206.5ms"
+    },
+    {
+      "scenario": "T04",
+      "status": "pass",
+      "same_5_tuple": true,
+      "lower_base_rtt_learned": true,
+      "observed_min_rtt": "30.4ms"
+    },
+    {
+      "scenario": "T05",
+      "status": "pass",
+      "same_5_tuple": true,
+      "min_rtt_rebased_upward_after_capacity_drop": true,
+      "observed_min_rtt": "220.7ms"
+    },
+    {
+      "scenario": "T06",
+      "status": "pass",
+      "same_5_tuple": true,
+      "lower_capacity_and_rtt_learned": true,
+      "observed_min_rtt": "20.2ms"
+    },
+    {
+      "scenario": "idle-download-to-upload",
+      "status": "pass",
+      "virtual_idle": "500ms",
+      "peak_same_time_submitted_bytes_at_most": 16384,
+      "non_zero_pacing": true
+    },
+    {
+      "scenario": "explicit-migration",
+      "status": "pass",
+      "new_controller_first_round": 1,
+      "new_controller_first_state": "Startup",
+      "old_max_bandwidth_survived": false,
+      "old_loss_or_recovery_state_survived": false
+    },
+    {
+      "scenario": "two-adaptive-bdp-equal-rtt",
+      "status": "pass",
+      "flow_goodput_bits_per_second": [13241686, 13417479],
+      "jain_fairness": 1.0,
+      "queue_delay_p95": "70.314667ms",
+      "tail_drops": 0
+    },
+    {
+      "scenario": "adaptive-bdp-vs-cubic",
+      "status": "pass",
+      "flow_goodput_bits_per_second": [11775138, 17095186],
+      "adaptive_to_competitor_ratio": 0.6888,
+      "asserted_ratio_range": [0.5, 2.0],
+      "tail_drops": 0
+    },
+    {
+      "scenario": "adaptive-bdp-vs-reno",
+      "status": "pass",
+      "flow_goodput_bits_per_second": [11929192, 17203872],
+      "adaptive_to_competitor_ratio": 0.6934,
+      "asserted_ratio_range": [0.5, 2.0],
+      "tail_drops": 0
+    },
+    {
+      "scenario": "two-adaptive-bdp-unequal-rtt",
+      "status": "pass",
+      "rtt_milliseconds": [20, 200],
+      "flow_goodput_bits_per_second": [21432315, 7908558],
+      "jain_fairness": 0.8248,
+      "both_flows_make_progress": true,
+      "numeric_fairness_threshold_defined": false
+    },
+    {
+      "scenario": "two-adaptive-bdp-late-start",
+      "status": "pass",
+      "first_flow_active_at_second_start": true,
+      "flow_goodput_bits_per_second": [16077445, 15861980],
+      "jain_fairness": 1.0
+    },
+    {
+      "scenario": "interactive-datagram-bidirectional-bulk",
+      "status": "pass",
+      "interactive_datagrams_per_direction": 100,
+      "forward_delivered_bytes": 656871,
+      "reverse_delivered_bytes": 123484,
+      "non_zero_pacing_both_directions": true
     }
   ]
 }

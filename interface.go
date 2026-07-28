@@ -37,6 +37,10 @@ const (
 type CwndTuning struct {
 	// Enable enables CwndTuning. AdaptiveBDP settings apply only with Algorithm set to CongestionControlAdaptiveBDP.
 	Enable bool
+	// EnableAdaptiveBDPTelemetry retains a bounded history of completed
+	// AdaptiveBDP rounds and state transitions in AdaptiveBDPDebugInfo.
+	// It is intended for deterministic validation and diagnostics.
+	EnableAdaptiveBDPTelemetry bool
 
 	// Algorithm selects Reno, Cubic, or AdaptiveBDP. The zero value selects Reno.
 	Algorithm CongestionControlAlgorithm
@@ -69,7 +73,7 @@ type CwndTuning struct {
 	ProbeUpGain float64
 	// ProbeDownGain is the ProbeDown pacing multiplier in [0, 1]. Zero uses 0.90.
 	ProbeDownGain float64
-	// CruisePacingGain is a non-negative steady-state pacing multiplier. Zero uses 1.05.
+	// CruisePacingGain is a non-negative steady-state pacing multiplier. Zero uses 1.01.
 	CruisePacingGain float64
 	// CruiseCwndGain is a non-negative steady-state cwnd-target multiplier. Zero uses 1.5.
 	CruiseCwndGain float64
@@ -146,11 +150,59 @@ type CwndTuning struct {
 
 	// MinRTTFilterWindow is the min-RTT filter lifetime. Zero uses the controller default; it must not be negative.
 	MinRTTFilterWindow time.Duration
-	// ProbeInterval is the minimum interval between ordinary ProbeUp attempts. Zero uses the controller default; it must not be negative.
+	// ProbeInterval is the minimum interval between ordinary ProbeUp attempts. Zero uses 900 ms; it must not be negative.
 	ProbeInterval time.Duration
 
 	// PacingMargin is the pacing safety fraction in [0, 0.99]. Zero uses the controller default.
 	PacingMargin float64
+}
+
+// AdaptiveBDPTelemetrySample records one completed AdaptiveBDP controller
+// round or state transition.
+type AdaptiveBDPTelemetrySample struct {
+	Event            string
+	Elapsed          time.Duration
+	RoundCount       uint64
+	State            string
+	TransitionReason string
+
+	CongestionWindow uint64
+	TargetCwnd       uint64
+	BytesInFlight    uint64
+	BDP              uint64
+
+	BandwidthBytesPerSecond         uint64
+	MaxBandwidthBytesPerSecond      uint64
+	ShortBandwidthBytesPerSecond    uint64
+	RecoveryBandwidthBytesPerSecond uint64
+	PacingRateBytesPerSecond        uint64
+	PacingGain                      float64
+	CwndGain                        float64
+
+	LatestRTT   time.Duration
+	SmoothedRTT time.Duration
+	MinRTT      time.Duration
+	QueueDelay  time.Duration
+	QueueTarget time.Duration
+	QueueState  string
+
+	LossRatioRound           float64
+	LossRatioEWMA            float64
+	LostBytesThisRound       uint64
+	AckedBytesThisRound      uint64
+	HasRecentECNCE           bool
+	LastLossActionReason     string
+	LastLossCwndMultiplier   float64
+	LastLossPacingMultiplier float64
+
+	PacingCutMultiplier float64
+	PacingCutRemaining  time.Duration
+	UploadWarmupActive  bool
+	IdleRestartActive   bool
+	ProbeUpActive       bool
+	ProbeDownActive     bool
+	ProbeRTTActive      bool
+	FullBwReached       bool
 }
 
 // AdaptiveBDPDebugInfo contains diagnostic state for CongestionControlAdaptiveBDP.
@@ -159,6 +211,9 @@ type CwndTuning struct {
 // the congestion controller at the time [Conn.AdaptiveBDPDebugInfo] is called.
 type AdaptiveBDPDebugInfo struct {
 	State string
+	// Telemetry is populated only when
+	// CwndTuning.EnableAdaptiveBDPTelemetry is enabled.
+	Telemetry []AdaptiveBDPTelemetrySample
 
 	CongestionWindow uint64
 	TargetCwnd       uint64
@@ -198,29 +253,37 @@ type AdaptiveBDPDebugInfo struct {
 	NoQueueLowRounds               uint32
 	NoQueueLowAcked                uint64
 
-	LossRatioRound              float64
-	LossRatioEWMA               float64
-	LostBytesThisRound          uint64
-	AckedBytesThisRound         uint64
-	LossMinBytes                uint64
-	EmergencyLossMinBytes       uint64
-	MinLossSampleBytes          uint64
-	LossGraceRatio              float64
-	LossSevereThreshold         float64
-	EmergencyLossThreshold      float64
-	QueuePressure               float64
-	MildLossRounds              uint32
-	LastLossActionReason        string
-	LastLossCwndMultiplier      float64
-	LastLossPacingMultiplier    float64
-	LastLossCutbackRound        uint64
-	SuppressProbeUpUntilRound   uint64
-	SuppressProbeUpReason       string
-	LossFreeRounds              uint32
-	LastMaterialLossRound       uint64
-	LossRecoveryProbeActive     bool
-	LossRecoveryProbeBW         uint64
-	LossRecoveryProbeUntilRound uint64
+	LossRatioRound               float64
+	LossRatioEWMA                float64
+	LostBytesThisRound           uint64
+	AckedBytesThisRound          uint64
+	LossMinBytes                 uint64
+	EmergencyLossMinBytes        uint64
+	MinLossSampleBytes           uint64
+	LossGraceRatio               float64
+	LossSevereThreshold          float64
+	EmergencyLossThreshold       float64
+	QueuePressure                float64
+	MildLossRounds               uint32
+	LastLossActionReason         string
+	LastLossCwndMultiplier       float64
+	LastLossPacingMultiplier     float64
+	LastLossCutbackRound         uint64
+	SuppressProbeUpUntilRound    uint64
+	SuppressProbeUpReason        string
+	LossFreeRounds               uint32
+	LastMaterialLossRound        uint64
+	LossRecoveryProbeActive      bool
+	LossRecoveryProbeBW          uint64
+	LossRecoveryProbeUntilRound  uint64
+	HasLastECNCE                 bool
+	LastECNCERound               uint64
+	PersistentCongestionEvents   uint64
+	LastPersistentCongestionSpan time.Duration
+	LastPersistentCongestionGate time.Duration
+	MaxOutstandingSentPackets    uint64
+	MaxTrackedSentPackets        uint64
+	TrackedSentPackets           uint64
 
 	RoundCount         uint64
 	RoundStart         bool

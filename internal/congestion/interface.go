@@ -25,7 +25,8 @@ const (
 )
 
 type CwndTuningConfig struct {
-	Enable bool
+	Enable                     bool
+	EnableAdaptiveBDPTelemetry bool
 
 	Algorithm CongestionControlAlgorithm
 
@@ -91,6 +92,54 @@ type CwndTuningConfig struct {
 	PacingMargin float64
 }
 
+// AdaptiveBDPTelemetrySample records one completed controller round or state
+// transition. Collection is opt-in through CwndTuningConfig.
+type AdaptiveBDPTelemetrySample struct {
+	Event            string
+	Elapsed          time.Duration
+	RoundCount       uint64
+	State            string
+	TransitionReason string
+
+	CongestionWindow protocol.ByteCount
+	TargetCwnd       protocol.ByteCount
+	BytesInFlight    protocol.ByteCount
+	BDP              protocol.ByteCount
+
+	BandwidthBytesPerSecond         uint64
+	MaxBandwidthBytesPerSecond      uint64
+	ShortBandwidthBytesPerSecond    uint64
+	RecoveryBandwidthBytesPerSecond uint64
+	PacingRateBytesPerSecond        uint64
+	PacingGain                      float64
+	CwndGain                        float64
+
+	LatestRTT   time.Duration
+	SmoothedRTT time.Duration
+	MinRTT      time.Duration
+	QueueDelay  time.Duration
+	QueueTarget time.Duration
+	QueueState  string
+
+	LossRatioRound           float64
+	LossRatioEWMA            float64
+	LostBytesThisRound       protocol.ByteCount
+	AckedBytesThisRound      protocol.ByteCount
+	HasRecentECNCE           bool
+	LastLossActionReason     string
+	LastLossCwndMultiplier   float64
+	LastLossPacingMultiplier float64
+
+	PacingCutMultiplier float64
+	PacingCutRemaining  time.Duration
+	UploadWarmupActive  bool
+	IdleRestartActive   bool
+	ProbeUpActive       bool
+	ProbeDownActive     bool
+	ProbeRTTActive      bool
+	FullBwReached       bool
+}
+
 type RateSample struct {
 	DeliveryRate   protocol.ByteCount // bytes/sec
 	AckedBytes     protocol.ByteCount
@@ -107,7 +156,8 @@ type RateSample struct {
 }
 
 type AdaptiveBDPDebugInfo struct {
-	State string
+	State     string
+	Telemetry []AdaptiveBDPTelemetrySample
 
 	CongestionWindow protocol.ByteCount
 	TargetCwnd       protocol.ByteCount
@@ -147,29 +197,37 @@ type AdaptiveBDPDebugInfo struct {
 	NoQueueLowRounds               uint32
 	NoQueueLowAcked                protocol.ByteCount
 
-	LossRatioRound              float64
-	LossRatioEWMA               float64
-	LostBytesThisRound          protocol.ByteCount
-	AckedBytesThisRound         protocol.ByteCount
-	LossMinBytes                protocol.ByteCount
-	EmergencyLossMinBytes       protocol.ByteCount
-	MinLossSampleBytes          protocol.ByteCount
-	LossGraceRatio              float64
-	LossSevereThreshold         float64
-	EmergencyLossThreshold      float64
-	QueuePressure               float64
-	MildLossRounds              uint32
-	LastLossActionReason        string
-	LastLossCwndMultiplier      float64
-	LastLossPacingMultiplier    float64
-	LastLossCutbackRound        uint64
-	SuppressProbeUpUntilRound   uint64
-	SuppressProbeUpReason       string
-	LossFreeRounds              uint32
-	LastMaterialLossRound       uint64
-	LossRecoveryProbeActive     bool
-	LossRecoveryProbeBW         uint64
-	LossRecoveryProbeUntilRound uint64
+	LossRatioRound               float64
+	LossRatioEWMA                float64
+	LostBytesThisRound           protocol.ByteCount
+	AckedBytesThisRound          protocol.ByteCount
+	LossMinBytes                 protocol.ByteCount
+	EmergencyLossMinBytes        protocol.ByteCount
+	MinLossSampleBytes           protocol.ByteCount
+	LossGraceRatio               float64
+	LossSevereThreshold          float64
+	EmergencyLossThreshold       float64
+	QueuePressure                float64
+	MildLossRounds               uint32
+	LastLossActionReason         string
+	LastLossCwndMultiplier       float64
+	LastLossPacingMultiplier     float64
+	LastLossCutbackRound         uint64
+	SuppressProbeUpUntilRound    uint64
+	SuppressProbeUpReason        string
+	LossFreeRounds               uint32
+	LastMaterialLossRound        uint64
+	LossRecoveryProbeActive      bool
+	LossRecoveryProbeBW          uint64
+	LossRecoveryProbeUntilRound  uint64
+	HasLastECNCE                 bool
+	LastECNCERound               uint64
+	PersistentCongestionEvents   uint64
+	LastPersistentCongestionSpan time.Duration
+	LastPersistentCongestionGate time.Duration
+	MaxOutstandingSentPackets    int
+	MaxTrackedSentPackets        int
+	TrackedSentPackets           int
 
 	RoundCount         uint64
 	RoundStart         bool

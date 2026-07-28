@@ -48,6 +48,7 @@ type captureRateSampleAlgorithm struct {
 	sentBytesInFlight []protocol.ByteCount
 	sentBytes         []protocol.ByteCount
 	sentAckEliciting  []bool
+	persistentEvents  int
 }
 
 func (a *captureRateSampleAlgorithm) TimeUntilSend(protocol.ByteCount) monotime.Time { return 0 }
@@ -64,6 +65,9 @@ func (a *captureRateSampleAlgorithm) OnPacketAcked(protocol.PacketNumber, protoc
 func (a *captureRateSampleAlgorithm) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
 }
 func (a *captureRateSampleAlgorithm) OnRetransmissionTimeout(bool) {}
+func (a *captureRateSampleAlgorithm) OnPersistentCongestion(monotime.Time) {
+	a.persistentEvents++
+}
 func (a *captureRateSampleAlgorithm) SetMaxDatagramSize(protocol.ByteCount) {
 }
 func (a *captureRateSampleAlgorithm) InSlowStart() bool { return false }
@@ -133,6 +137,44 @@ func TestSentPacketHandlerPassesPostSendBytesInFlightToCongestionController(t *t
 	require.Equal(t, []protocol.ByteCount{1200}, algorithm.sentBytesInFlight)
 	require.Equal(t, []protocol.ByteCount{1200}, algorithm.sentBytes)
 	require.Equal(t, []bool{true}, algorithm.sentAckEliciting)
+}
+
+func TestSentPacketHandlerAccumulatesPersistentCongestionAcrossLossBatches(t *testing.T) {
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	algorithm := &captureRateSampleAlgorithm{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		rttStats,
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveServer,
+		nil,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	sph.congestion = algorithm
+
+	start := monotime.Now()
+	threshold := 3 * rttStats.PTO(true)
+	sph.notePersistentCongestionLoss(start, rttStats.PTO(true))
+	sph.maybeReportPersistentCongestion(start.Add(threshold))
+	require.Zero(t, algorithm.persistentEvents)
+
+	// A later loss is recorded by a separate loss-detection pass. The
+	// accumulated send-time span, not either individual batch, crosses the
+	// persistent-congestion threshold.
+	sph.notePersistentCongestionLoss(start.Add(threshold), rttStats.PTO(true))
+	sph.maybeReportPersistentCongestion(start.Add(threshold))
+	require.Equal(t, 1, algorithm.persistentEvents)
+	sph.maybeReportPersistentCongestion(start.Add(2 * threshold))
+	require.Equal(t, 1, algorithm.persistentEvents, "one outage must reset the controller only once")
+
+	sph.resetPersistentCongestionInterval()
+	require.Zero(t, sph.persistentCongestionStart)
+	require.False(t, sph.persistentCongestionReported)
 }
 
 func ackRanges(pns ...protocol.PacketNumber) []wire.AckRange {
@@ -2107,6 +2149,11 @@ func TestDynamicOutstandingPacketLimitForLargeAdaptiveCwnd(t *testing.T) {
 			require.Equal(t, test.outstanding, sph.maxOutstandingSentPackets())
 			require.Equal(t, test.tracked, sph.maxTrackedSentPackets())
 			require.Greater(t, sph.maxTrackedSentPackets(), sph.maxOutstandingSentPackets())
+			info, ok := sph.AdaptiveBDPDebugInfo()
+			require.True(t, ok)
+			require.Equal(t, test.outstanding, info.MaxOutstandingSentPackets)
+			require.Equal(t, test.tracked, info.MaxTrackedSentPackets)
+			require.Zero(t, info.TrackedSentPackets)
 		})
 	}
 }
