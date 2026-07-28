@@ -4,6 +4,14 @@
 
 # A QUIC implementation in pure Go
 
+## О форке AdaptiveBDP
+
+Этот форк `quic-go` добавляет контроллер перегрузки **AdaptiveBDP**, рассчитанный прежде всего на высокопроизводительные сетевые каналы с известной или недавно измеренной пропускной способностью. Его задача — поддерживать скорость передачи и congestion window на уровне, соответствующем BDP канала, не допуская резкого падения производительности из-за единичного низкого измерения скорости, если при этом нет признаков реальной перегрузки.
+
+AdaptiveBDP отдельно учитывает потери, ECN и рост очереди: при подтверждённой перегрузке он снижает параметры пропорционально тяжести ситуации, а без неё адаптируется консервативно и сохраняет заданный минимум скорости. Параметры настройки и отладочное состояние доступны через публичный API `CwndTuning` и `Conn.AdaptiveBDPDebugInfo()`.
+
+Подробнее об устройстве контроллера см. в [ADAPTIVE_BDP_ARCHITECTURE.md](ADAPTIVE_BDP_ARCHITECTURE.md).
+
 
 [![Documentation](https://img.shields.io/badge/docs-quic--go.net-red?style=flat)](https://quic-go.net/docs/)
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/quic-go/quic-go)](https://pkg.go.dev/github.com/quic-go/quic-go)
