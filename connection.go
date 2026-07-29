@@ -101,6 +101,11 @@ var deadlineSendImmediately = monotime.Time(42 * time.Millisecond) // any value 
 
 type blockMode uint8
 
+type adaptiveBDPDebugInfoResponse struct {
+	info AdaptiveBDPDebugInfo
+	ok   bool
+}
+
 const (
 	// blockModeNone means that the connection is not blocked.
 	blockModeNone blockMode = iota
@@ -172,10 +177,11 @@ type Conn struct {
 	oneRTTStream        *cryptoStream // only set for the server
 	cryptoStreamHandler cryptoStreamHandler
 
-	notifyReceivedPacket chan struct{}
-	sendingScheduled     chan struct{}
-	receivedPacketMx     sync.Mutex
-	receivedPackets      ringbuffer.RingBuffer[receivedPacket]
+	notifyReceivedPacket         chan struct{}
+	sendingScheduled             chan struct{}
+	adaptiveBDPDebugInfoRequests chan chan adaptiveBDPDebugInfoResponse
+	receivedPacketMx             sync.Mutex
+	receivedPackets              ringbuffer.RingBuffer[receivedPacket]
 
 	// closeChan is used to notify the run loop that it should terminate
 	closeChan chan struct{}
@@ -558,6 +564,7 @@ func (c *Conn) preSetup() {
 	c.notifyReceivedPacket = make(chan struct{}, 1)
 	c.closeChan = make(chan struct{}, 1)
 	c.sendingScheduled = make(chan struct{}, 1)
+	c.adaptiveBDPDebugInfoRequests = make(chan chan adaptiveBDPDebugInfoResponse, 1)
 	c.handshakeCompleteChan = make(chan struct{})
 
 	now := monotime.Now()
@@ -618,6 +625,11 @@ runLoop:
 			break runLoop
 		default:
 		}
+		select {
+		case responseChan := <-c.adaptiveBDPDebugInfoRequests:
+			c.sendAdaptiveBDPDebugInfo(responseChan)
+		default:
+		}
 
 		// no need to set a timer if we can send packets immediately
 		if c.pacingDeadline != deadlineSendImmediately {
@@ -667,6 +679,9 @@ runLoop:
 			select {
 			case <-c.closeChan:
 				break runLoop
+			case responseChan := <-c.adaptiveBDPDebugInfoRequests:
+				c.sendAdaptiveBDPDebugInfo(responseChan)
+				continue
 			case <-c.timer.C:
 			case <-c.sendingScheduled:
 			case <-sendQueueAvailable:
@@ -853,11 +868,36 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 	}
 }
 
-// AdaptiveBDPDebugInfo returns diagnostic state for CongestionControlAdaptiveBDP.
+// AdaptiveBDPDebugInfo returns a consistent diagnostic snapshot for
+// CongestionControlAdaptiveBDP. It is safe to call concurrently with connection
+// activity.
 //
 // The second return value is false when the connection is not using the
 // AdaptiveBDP congestion controller, or when congestion state is not available.
 func (c *Conn) AdaptiveBDPDebugInfo() (AdaptiveBDPDebugInfo, bool) {
+	if c.adaptiveBDPDebugInfoRequests == nil {
+		return c.adaptiveBDPDebugInfo()
+	}
+	responseChan := make(chan adaptiveBDPDebugInfoResponse, 1)
+	select {
+	case c.adaptiveBDPDebugInfoRequests <- responseChan:
+	case <-c.ctx.Done():
+		return AdaptiveBDPDebugInfo{}, false
+	}
+	select {
+	case response := <-responseChan:
+		return response.info, response.ok
+	case <-c.ctx.Done():
+		return AdaptiveBDPDebugInfo{}, false
+	}
+}
+
+func (c *Conn) sendAdaptiveBDPDebugInfo(responseChan chan adaptiveBDPDebugInfoResponse) {
+	info, ok := c.adaptiveBDPDebugInfo()
+	responseChan <- adaptiveBDPDebugInfoResponse{info: info, ok: ok}
+}
+
+func (c *Conn) adaptiveBDPDebugInfo() (AdaptiveBDPDebugInfo, bool) {
 	if c.sentPacketHandler == nil {
 		return AdaptiveBDPDebugInfo{}, false
 	}

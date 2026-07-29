@@ -127,6 +127,15 @@ constants. The full Windows suite, AdaptiveBDP stress/deterministic/soak
 gates, Linux Go 1.26 race core, and Linux Go 1.25 full suite all passed again
 after this cleanup.
 
+The RC.3 remote integration race job then exposed a concurrent read in the
+public `Conn.AdaptiveBDPDebugInfo` path used by the new live
+`WriteWithLimit` regression. RC.4 routes diagnostic requests through the
+connection's single-owner run loop, producing a consistent snapshot without
+locking the congestion controller's hot path. The controller algorithm and
+tuning remain unchanged. The exact Linux Go 1.25 integration race suite
+passed after the fix, as did 20 repeated targeted race runs of
+`TestWriteWithLimitAdaptiveBDP`.
+
 ## Release handoff
 
 The source tree is ready for RC validation. Remote GitHub Actions and any deployment-specific
