@@ -42,6 +42,33 @@ func TestAdaptiveBDPDeterministicLinkBulkTransfer(t *testing.T) {
 	})
 }
 
+func TestAdaptiveBDPDeterministicLinkWriteWithLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		config := simnet.DeterministicDirectionConfig{
+			BandwidthBitsPerSecond: 10_000_000,
+			BaseLatency:            25 * time.Millisecond,
+			QueueLimitBytes:        256 * 1024,
+		}
+		result := runAdaptiveBDPDeterministicBulkTransfer(t, adaptiveBDPLinkScenario{
+			linkConfig:           simnet.DeterministicLinkConfig{Forward: config, Reverse: config},
+			startupTargetRateBps: 10_000_000,
+			payloadBytes:         2 * 1024 * 1024,
+			initialWriteBytes:    256 * 1024,
+			pacedWriteUntil:      1200 * time.Millisecond,
+			pacedWriteInterval:   25 * time.Millisecond,
+			pacedWriteBytes:      16 * 1024,
+			pacedWriteWithLimit:  true,
+			timeout:              6 * time.Second,
+		})
+		require.Zero(t, result.forward.TailDrops, "higher-level flow control must not create synthetic congestion")
+		require.False(t, result.info.HasCongestionEvidence)
+		require.Greater(t, result.info.PacingRateBytesPerSecond, uint64(0))
+		require.GreaterOrEqual(t, result.info.CongestionWindow, result.info.MinCwnd)
+		require.LessOrEqual(t, result.info.CongestionWindow, result.info.MaxCwnd)
+		require.NotContains(t, result.info.LastBWChangeReason, "downshift")
+	})
+}
+
 func TestAdaptiveBDPDeterministicLinkCleanPaths(t *testing.T) {
 	// C01-C06 are real QUIC upload runs over a finite, one-BDP bottleneck.
 	// The invariant is intentionally independent of host scheduling: every
@@ -1245,6 +1272,7 @@ type adaptiveBDPLinkScenario struct {
 	pacedWriteUntil               time.Duration
 	pacedWriteInterval            time.Duration
 	pacedWriteBytes               int
+	pacedWriteWithLimit           bool
 	pacedWritePauses              []adaptiveBDPWritePause
 	minRTTFilterWindow            time.Duration
 	maxWindowPackets              uint32
@@ -1508,8 +1536,25 @@ func runAdaptiveBDPDeterministicBulkTransfer(t *testing.T, scenario adaptiveBDPL
 			chunkBytes = 1200
 		}
 		end := min(written+chunkBytes, len(payload))
-		n, writeErr := stream.Write(payload[written:end])
-		require.NoError(t, writeErr)
+		var n int
+		if scenario.pacedWriteWithLimit {
+			credit := end - written
+			var writeErr error
+			n, writeErr = stream.WriteWithLimit(payload[written:], func(maxBytes int) int {
+				allowed := min(maxBytes, credit)
+				credit -= allowed
+				return allowed
+			})
+			if end < len(payload) {
+				require.ErrorIs(t, writeErr, quic.ErrWriteLimitReached)
+			} else {
+				require.NoError(t, writeErr)
+			}
+		} else {
+			var writeErr error
+			n, writeErr = stream.Write(payload[written:end])
+			require.NoError(t, writeErr)
+		}
 		require.Equal(t, end-written, n)
 		written = end
 		<-time.After(scenario.pacedWriteInterval)
