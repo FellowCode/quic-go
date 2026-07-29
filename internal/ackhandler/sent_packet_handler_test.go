@@ -62,22 +62,23 @@ func (a *captureRateSampleAlgorithm) CanSend(protocol.ByteCount) bool { return t
 func (a *captureRateSampleAlgorithm) MaybeExitSlowStart()             {}
 func (a *captureRateSampleAlgorithm) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, monotime.Time) {
 }
+
 func (a *captureRateSampleAlgorithm) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
 }
 func (a *captureRateSampleAlgorithm) OnRetransmissionTimeout(bool) {}
 func (a *captureRateSampleAlgorithm) OnPersistentCongestion(monotime.Time) {
 	a.persistentEvents++
 }
-func (a *captureRateSampleAlgorithm) SetMaxDatagramSize(protocol.ByteCount) {
-}
-func (a *captureRateSampleAlgorithm) InSlowStart() bool { return false }
-func (a *captureRateSampleAlgorithm) InRecovery() bool  { return false }
+func (a *captureRateSampleAlgorithm) SetMaxDatagramSize(protocol.ByteCount) {}
+func (a *captureRateSampleAlgorithm) InSlowStart() bool                     { return false }
+func (a *captureRateSampleAlgorithm) InRecovery() bool                      { return false }
 func (a *captureRateSampleAlgorithm) GetCongestionWindow() protocol.ByteCount {
 	if a.cwnd == 0 {
 		return 10 * 1200
 	}
 	return a.cwnd
 }
+
 func (a *captureRateSampleAlgorithm) OnPacketAckedWithRateSample(
 	number protocol.PacketNumber,
 	ackedBytes protocol.ByteCount,

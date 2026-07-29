@@ -135,7 +135,7 @@ func (c *packetConnWithECN) ReadPacket() (receivedPacket, error) {
 		rcvTime:    monotime.Now(),
 		data:       buffer.Data[:n],
 		buffer:     buffer,
-		ecn:        protocol.ParseECNHeaderBits(byte(ecnBits)),
+		ecn:        protocol.ParseECNHeaderBits(ecnBits),
 	}, nil
 }
 
@@ -146,7 +146,7 @@ func (c *packetConnWithECN) WritePacket(b []byte, addr net.Addr, _ []byte, gsoSi
 	if ecn == protocol.ECNUnsupported {
 		return c.WriteTo(b, addr)
 	}
-	return c.WriteToWithECN(b, addr, uint8(ecn.ToHeaderBits()))
+	return c.WriteToWithECN(b, addr, ecn.ToHeaderBits())
 }
 
 func (c *packetConnWithECN) capabilities() connCapabilities {

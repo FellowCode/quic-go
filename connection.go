@@ -3320,6 +3320,7 @@ func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
 func toCongestionCwndTuningConfig(c CwndTuning) congestion.CwndTuningConfig {
 	algorithm := congestion.CongestionControlReno
 	switch c.Algorithm {
+	case CongestionControlReno:
 	case CongestionControlCubic:
 		algorithm = congestion.CongestionControlCubic
 	case CongestionControlAdaptiveBDP:

@@ -202,6 +202,7 @@ func NewSentPacketHandlerWithCongestionConfig(
 func (h *sentPacketHandler) newCongestionController(initialMaxDatagramSize protocol.ByteCount) congestion.SendAlgorithmWithDebugInfos {
 	tuning := h.ccConfig.CwndTuning
 	switch tuning.Algorithm {
+	case congestion.CongestionControlReno:
 	case congestion.CongestionControlAdaptiveBDP:
 		if tuning.Enable {
 			return congestion.NewAdaptiveBDPSender(

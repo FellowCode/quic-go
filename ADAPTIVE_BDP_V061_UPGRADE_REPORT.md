@@ -119,6 +119,14 @@ RC.2: integer loops now use range-over-integer where applicable, and one
 non-negative duration clamp uses `max`. The full repository suite and
 AdaptiveBDP deterministic tests passed after the rewrite.
 
+RC.3 resolves the remaining upstream `golangci-lint` findings: explicit
+baseline cases were added to exhaustive switches, redundant conversions were
+removed, a boolean expression was simplified, and unused AdaptiveBDP helpers
+were deleted. These changes do not alter controller decisions or tuning
+constants. The full Windows suite, AdaptiveBDP stress/deterministic/soak
+gates, Linux Go 1.26 race core, and Linux Go 1.25 full suite all passed again
+after this cleanup.
+
 ## Release handoff
 
 The source tree is ready for RC validation. Remote GitHub Actions and any deployment-specific

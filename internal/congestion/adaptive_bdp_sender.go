@@ -48,6 +48,8 @@ const (
 
 func (s adaptiveQueueState) String() string {
 	switch s {
+	case adaptiveQueueUnknown:
+		return "unknown"
 	case adaptiveQueueEmpty:
 		return "empty"
 	case adaptiveQueueBuilding:
@@ -60,7 +62,6 @@ func (s adaptiveQueueState) String() string {
 }
 
 const (
-	adaptiveBDPHealthyBandwidthRatio = 0.98
 	// The default gain approximately cancels the default 1% pacing margin.
 	// Capacity discovery is handled by bounded ProbeUp rounds, so cruise does
 	// not continuously inject the 4% excess that caused recurring queue
@@ -788,10 +789,6 @@ func (s *adaptiveBDPSender) recordTelemetry(event string, now monotime.Time, pri
 	s.telemetry = append(s.telemetry, sample)
 }
 
-func (s *adaptiveBDPSender) enterState(st adaptiveBDPState, now monotime.Time) {
-	s.enterStateWithReason(st, now, "state_transition")
-}
-
 func (s *adaptiveBDPSender) enterStateWithReason(st adaptiveBDPState, now monotime.Time, reason string) {
 	if s.state == st {
 		if reason != "" {
@@ -948,7 +945,7 @@ func (s *adaptiveBDPSender) canRebaseProbeRTTMinRTT() bool {
 	if s.hasLastECNCE && s.lastECNCERound >= s.probeRTTRound {
 		return false
 	}
-	return !(s.hasMaterialLossRound && s.lastMaterialLossRound >= s.probeRTTRound)
+	return !s.hasMaterialLossRound || s.lastMaterialLossRound < s.probeRTTRound
 }
 
 func (s *adaptiveBDPSender) isProbeRTTSampleDrained(rtt time.Duration) bool {
@@ -2025,16 +2022,6 @@ func (s *adaptiveBDPSender) inProtectedStartup(now monotime.Time) bool {
 	return now.Sub(s.lastStateChange) <= d
 }
 
-func (s *adaptiveBDPSender) bandwidthOutweighsLoss() bool {
-	if !s.hasLastBandwidthSample || !s.isFreshBandwidthRound(s.lastBandwidthSampleRound) || s.maxBw == 0 {
-		return false
-	}
-	if s.hasLastBandwidthGrowth && s.isFreshBandwidthRound(s.lastBandwidthGrowthRound) {
-		return true
-	}
-	return float64(s.lastBandwidthSample) >= float64(s.maxBw)*adaptiveBDPHealthyBandwidthRatio
-}
-
 func (s *adaptiveBDPSender) canReactToLoss() bool {
 	if s.lostBytesThisRound < s.lossMinBytes() {
 		s.lastLossActionReason = "loss_below_absolute_threshold"
@@ -2145,10 +2132,6 @@ func (s *adaptiveBDPSender) canProbeUp() bool {
 		return true
 	}
 	return false
-}
-
-func (s *adaptiveBDPSender) isFreshBandwidthRound(round uint64) bool {
-	return round == s.roundCount || round+1 == s.roundCount
 }
 
 func (s *adaptiveBDPSender) lossCutbackCooldown() time.Duration {
@@ -2516,6 +2499,8 @@ func (s *adaptiveBDPSender) cwndGain() float64 {
 		return min(s.cruiseCwndGain(), 1.25)
 	case adaptiveBDPProbeRTT:
 		return 1.0
+	case adaptiveBDPProbeBW:
+		return s.cruiseCwndGain()
 	default:
 		return s.cruiseCwndGain()
 	}
@@ -2576,6 +2561,8 @@ func (s *adaptiveBDPSender) pacingGain() float64 {
 			return s.probeUpGain()
 		}
 		return s.cruisePacingGain()
+	case adaptiveBDPProbeRTT:
+		return 1.0
 	default:
 		return 1.0
 	}

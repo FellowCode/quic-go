@@ -1733,14 +1733,14 @@ func TestAdaptiveBDPThirtyMbps150msNoLossModel(t *testing.T) {
 	var deliveredTotal protocol.ByteCount
 	var checkedFiveSeconds bool
 	minCwndAfterFiveSeconds := s.maxCongestionWindow
-	minPacingAfterFiveSeconds := uint64(^uint64(0))
+	minPacingAfterFiveSeconds := ^uint64(0)
 	minFillAfterFiveSeconds := 1.0
 
 	for step, elapsed := 0, time.Duration(0); elapsed <= 20*time.Second; step, elapsed = step+1, elapsed+baseRTT {
 		now := start.Add(elapsed)
 		clock = mockClock(now)
 		priorInFlight := min(s.congestionWindow, capacityPerRTT)
-		require.Greater(t, priorInFlight, protocol.ByteCount(0))
+		require.Positive(t, priorInFlight)
 		deliveredTotal += priorInFlight
 		s.OnPacketAckedWithRateSample(
 			protocol.PacketNumber(step+1),
@@ -2382,8 +2382,8 @@ func TestAdaptiveBDPDownshiftsOnPipeFilledBandwidthDrop(t *testing.T) {
 		IsValid:      true,
 	}, priorInFlight)
 	require.Greater(t, s.shortBw, uint64(0))
-	require.GreaterOrEqual(t, s.shortBw, uint64(mbitToBytesPerSecond(10)))
-	require.Less(t, s.shortBw, uint64(mbitToBytesPerSecond(30)))
+	require.GreaterOrEqual(t, s.shortBw, mbitToBytesPerSecond(10))
+	require.Less(t, s.shortBw, mbitToBytesPerSecond(30))
 	require.Equal(t, min(s.maxBw, s.shortBw), s.bw)
 	require.Equal(t, adaptiveBDPProbeDown, s.state)
 	require.Equal(t, "short_bw_downshift_with_congestion_evidence", s.lastBWChangeReason)
