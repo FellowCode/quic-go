@@ -2169,7 +2169,7 @@ func BenchmarkDynamicPacketHistory(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		history := newSentPacketHistory(true)
-		for pn := protocol.PacketNumber(0); pn < 128; pn++ {
+		for pn := range protocol.PacketNumber(128) {
 			history.SentPacket(pn, getPacket())
 		}
 		for _, p := range history.packets {

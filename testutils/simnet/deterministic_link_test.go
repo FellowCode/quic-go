@@ -91,7 +91,7 @@ func TestDeterministicLinkRandomLossUsesFixedSeed(t *testing.T) {
 		})
 	}
 	first, second := newLink(), newLink()
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		acceptedFirst, _ := first.Send(LinkForward, testPacket("x"))
 		acceptedSecond, _ := second.Send(LinkForward, testPacket("x"))
 		require.Equal(t, acceptedFirst, acceptedSecond)

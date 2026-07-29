@@ -1537,7 +1537,7 @@ func TestAdaptiveBDPLossAccountingFinalizesOncePerRound(t *testing.T) {
 	s.lastRoundStartTime = base
 
 	s.ackedBytesThisRound = 97_000
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		s.OnCongestionEvent(protocol.PacketNumber(i+1), 300, 64*1280)
 	}
 	require.Zero(t, s.mildLossRounds, "loss callbacks must not count as rounds")
@@ -1667,7 +1667,7 @@ func TestStartupReaches100MbitWithin5sModel(t *testing.T) {
 
 	const bottleneck = 100_000_000.0 / 8.0
 	now := monotime.Now()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		rate := min(float64(s.pacingRateBytesPerSecond), bottleneck)
 		s.OnPacketAckedWithRateSample(
 			protocol.PacketNumber(i+1),
@@ -1806,7 +1806,7 @@ func TestDownshiftOnBandwidthDrop(t *testing.T) {
 	s.updatePacingRate()
 
 	now := monotime.Now()
-	for i := 0; i < 1; i++ {
+	for i := range 1 {
 		s.OnPacketAckedWithRateSample(
 			protocol.PacketNumber(i+1),
 			1280,
@@ -2297,7 +2297,7 @@ func TestAdaptiveBDPNoQueueLowCandidateWaitsForConfirmation(t *testing.T) {
 	s.congestionWindow = 800 * 1280
 	priorInFlight := protocol.ByteCount(430 * 1280)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		s.roundCount = uint64(i)
 		s.updateBandwidthAt(RateSample{
 			DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(10)),
@@ -2340,7 +2340,7 @@ func TestAdaptiveBDPNoQueueLowCandidateWaitsForConfirmation(t *testing.T) {
 	s2.bw = mbitToBytesPerSecond(30)
 	s2.maxBw = s2.bw
 	s2.congestionWindow = 800 * 1280
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		s2.roundCount = uint64(i)
 		s2.updateBandwidthAt(RateSample{
 			DeliveryRate: protocol.ByteCount(mbitToBytesPerSecond(10)),
@@ -2501,7 +2501,7 @@ func TestAdaptiveBDPNoQueueLowSamplesDownshiftGradually(t *testing.T) {
 	s.congestionWindow = 800 * 1280
 	priorInFlight := protocol.ByteCount(430 * 1280)
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		s.roundCount = uint64(i)
 		now := start.Add(time.Duration(i) * 400 * time.Millisecond)
 		clock = mockClock(now)
@@ -2627,7 +2627,7 @@ func TestAdaptiveBDPNoCongestionDownshiftIsGradual(t *testing.T) {
 	s.maxBw = s.bw
 	s.congestionWindow = 800 * 1280
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		s.roundCount = uint64(i)
 		s.updateBandwidthAt(RateSample{
 			IsValid:      true,
@@ -2799,8 +2799,8 @@ func TestAdaptiveBDPRealNoQueueBandwidthDropEventuallyAdaptsGradually(t *testing
 	sampleBW := mbitToBytesPerSecond(10)
 
 	var observed []uint64
-	for cycle := 0; cycle < 4; cycle++ {
-		for i := 0; i < 4; i++ {
+	for cycle := range 4 {
+		for i := range 4 {
 			round := cycle*4 + i
 			s.roundCount = uint64(round)
 			s.updateBandwidthAt(RateSample{

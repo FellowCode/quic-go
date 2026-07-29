@@ -110,11 +110,17 @@ Standalone validation passed:
 
 ```bash
 actionlint .github/workflows/adaptive-bdp-release.yml
+go fix -diff ./...
 ```
+
+The first remote RC lint run identified Go 1.26 `go fix` rewrites in legacy
+AdaptiveBDP sources and tests. The mechanical rewrites were applied before
+RC.2: integer loops now use range-over-integer where applicable, and one
+non-negative duration clamp uses `max`. The full repository suite and
+AdaptiveBDP deterministic tests passed after the rewrite.
 
 ## Release handoff
 
-The source tree is ready for an RC tag such as
-`v0.61.0-adaptive.1-rc.1`. Remote GitHub Actions and any deployment-specific
+The source tree is ready for RC validation. Remote GitHub Actions and any deployment-specific
 VPN / NIC-offload smoke tests should run against that exact tag before
 promoting it to `v0.61.0-adaptive.1`.

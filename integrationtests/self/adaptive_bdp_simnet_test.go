@@ -455,7 +455,7 @@ func TestAdaptiveBDPDeterministicLinkInteractiveDatagramBidirectionalAndBulk(t *
 		sendDatagrams := func(conn *quic.Conn, prefix byte) <-chan error {
 			done := make(chan error, 1)
 			go func() {
-				for i := 0; i < datagrams; i++ {
+				for range datagrams {
 					if err := conn.SendDatagram(bytes.Repeat([]byte{prefix}, 256)); err != nil {
 						done <- err
 						return
@@ -469,7 +469,7 @@ func TestAdaptiveBDPDeterministicLinkInteractiveDatagramBidirectionalAndBulk(t *
 		receiveDatagrams := func(conn *quic.Conn, prefix byte) <-chan error {
 			done := make(chan error, 1)
 			go func() {
-				for i := 0; i < datagrams; i++ {
+				for range datagrams {
 					data, err := conn.ReceiveDatagram(ctx)
 					if err != nil {
 						done <- err

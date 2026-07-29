@@ -635,10 +635,7 @@ func (s *adaptiveBDPSender) AdaptiveBDPDebugInfo() AdaptiveBDPDebugInfo {
 	pacerBudget := s.pacer.Budget(now)
 	timeUntilSend := time.Duration(0)
 	if sendTime := s.pacer.TimeUntilSend(); !sendTime.IsZero() {
-		timeUntilSend = sendTime.Sub(now)
-		if timeUntilSend < 0 {
-			timeUntilSend = 0
-		}
+		timeUntilSend = max(sendTime.Sub(now), 0)
 	}
 	return AdaptiveBDPDebugInfo{
 		State:     s.state.String(),
