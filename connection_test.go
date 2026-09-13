@@ -51,13 +51,15 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 			info: congestion.AdaptiveBDPDebugInfo{
 				State: "ProbeBW",
 				Telemetry: []congestion.AdaptiveBDPTelemetrySample{{
-					Event:            "round",
-					Elapsed:          250 * time.Millisecond,
-					RoundCount:       41,
-					State:            "ProbeBW",
-					TransitionReason: "drain_complete",
-					CongestionWindow: 1200,
-					FullBwReached:    true,
+					Event:             "round",
+					Elapsed:           250 * time.Millisecond,
+					RoundCount:        41,
+					State:             "ProbeBW",
+					TransitionReason:  "drain_complete",
+					SharedQueueDelay:  12 * time.Millisecond,
+					ControlQueueDelay: 8 * time.Millisecond,
+					CongestionWindow:  1200,
+					FullBwReached:     true,
 				}},
 
 				CongestionWindow: 1234,
@@ -81,13 +83,15 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 				LastSampleAppLimited:           true,
 				LastSampleValid:                true,
 
-				MinRTT:      100 * time.Millisecond,
-				SmoothedRTT: 120 * time.Millisecond,
-				QueueDelay:  20 * time.Millisecond,
-				QueueTarget: 25 * time.Millisecond,
-				QueueState:  "persistent",
-				PacingGain:  1.05,
-				CwndGain:    1.5,
+				MinRTT:            100 * time.Millisecond,
+				SmoothedRTT:       120 * time.Millisecond,
+				QueueDelay:        20 * time.Millisecond,
+				SharedQueueDelay:  12 * time.Millisecond,
+				ControlQueueDelay: 8 * time.Millisecond,
+				QueueTarget:       25 * time.Millisecond,
+				QueueState:        "persistent",
+				PacingGain:        1.05,
+				CwndGain:          1.5,
 
 				NegativeBandwidthConfidence:    0.75,
 				HasCongestionEvidence:          true,
@@ -156,6 +160,10 @@ func TestAdaptiveBDPDebugInfoPublicAPI(t *testing.T) {
 	require.Equal(t, 250*time.Millisecond, info.Telemetry[0].Elapsed)
 	require.Equal(t, uint64(1200), info.Telemetry[0].CongestionWindow)
 	require.True(t, info.Telemetry[0].FullBwReached)
+	require.Equal(t, 12*time.Millisecond, info.SharedQueueDelay)
+	require.Equal(t, 8*time.Millisecond, info.ControlQueueDelay)
+	require.Equal(t, info.SharedQueueDelay, info.Telemetry[0].SharedQueueDelay)
+	require.Equal(t, info.ControlQueueDelay, info.Telemetry[0].ControlQueueDelay)
 	require.Equal(t, uint64(1234), info.CongestionWindow)
 	require.Equal(t, uint64(2345), info.TargetCwnd)
 	require.Equal(t, uint64(1_000_000), info.BandwidthBytesPerSecond)

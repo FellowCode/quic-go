@@ -75,12 +75,13 @@ type CwndTuning struct {
 	ProbeDownGain float64
 	// CruisePacingGain is a non-negative steady-state pacing multiplier. Zero uses 1.01.
 	CruisePacingGain float64
-	// CruiseCwndGain is a non-negative steady-state cwnd-target multiplier. Zero uses 1.5.
+	// CruiseCwndGain is a non-negative steady-state cwnd-target multiplier.
+	// Zero uses 1.5 with excess inflight capped to two QueueTarget intervals.
 	CruiseCwndGain float64
 
-	// QueueTarget is a non-negative soft queue-delay target. Zero derives a target from min RTT, bounded to 5–25 ms.
+	// QueueTarget is a non-negative soft queue-delay target. Zero uses 10 ms, independent of propagation RTT.
 	QueueTarget time.Duration
-	// QueuePersistentRounds is the positive confirmation count in AdaptiveBDP rounds for persistent queue evidence. Zero uses 3 rounds.
+	// QueuePersistentRounds is the positive confirmation count in packet-timed AdaptiveBDP rounds for persistent queue evidence. Zero uses 1 round.
 	QueuePersistentRounds uint32
 
 	// LossTarget is the target loss ratio in [0, 1]. Zero uses the controller default.
@@ -97,7 +98,8 @@ type CwndTuning struct {
 	LossMinBytes uint64
 	// EmergencyLossMinBytes is the minimum lost-byte observation for emergency reaction. Zero uses the controller default.
 	EmergencyLossMinBytes uint64
-	// MinLossSampleBytes is the minimum total ACKed plus lost byte sample. Zero uses the controller default.
+	// MinLossSampleBytes is the minimum total ACKed plus lost byte sample.
+	// Smaller rounds accumulate until this threshold is reached. Zero uses the controller default.
 	MinLossSampleBytes uint64
 	// LossEWMAAlpha is the loss-memory weighting fraction. Zero uses 0.25; an explicit value must be in [0.01, 1].
 	LossEWMAAlpha float64
@@ -113,7 +115,8 @@ type CwndTuning struct {
 	MaxLossPacingCutWithQueue float64
 	// LossCutbackCooldown is the minimum time between loss cutbacks. Zero uses the controller default; it must not be negative.
 	LossCutbackCooldown time.Duration
-	// MildLossPersistentRounds is the number of loss rounds required before a no-queue cutback. Zero uses the controller default.
+	// MildLossPersistentRounds is the number of sufficiently large loss observations required before a no-queue cutback.
+	// An observation can span multiple small rounds. Zero uses the controller default.
 	MildLossPersistentRounds uint32
 	// LossRecoveryProbeRounds is the number of loss-free rounds before recovery probing. Zero uses the controller default.
 	LossRecoveryProbeRounds uint32
@@ -150,15 +153,15 @@ type CwndTuning struct {
 
 	// MinRTTFilterWindow is the min-RTT filter lifetime. Zero uses the controller default; it must not be negative.
 	MinRTTFilterWindow time.Duration
-	// ProbeInterval is the minimum interval between ordinary ProbeUp attempts. Zero uses 900 ms; it must not be negative.
+	// ProbeInterval is the minimum interval between ordinary ProbeUp attempts. Zero uses 450 ms; it must not be negative.
 	ProbeInterval time.Duration
 
 	// PacingMargin is the pacing safety fraction in [0, 0.99]. Zero uses the controller default.
 	PacingMargin float64
 }
 
-// AdaptiveBDPTelemetrySample records one completed AdaptiveBDP controller
-// round or state transition.
+// AdaptiveBDPTelemetrySample records a completed AdaptiveBDP controller
+// round, state transition, or bandwidth downshift.
 type AdaptiveBDPTelemetrySample struct {
 	Event            string
 	Elapsed          time.Duration
@@ -183,8 +186,12 @@ type AdaptiveBDPTelemetrySample struct {
 	SmoothedRTT time.Duration
 	MinRTT      time.Duration
 	QueueDelay  time.Duration
-	QueueTarget time.Duration
-	QueueState  string
+	// SharedQueueDelay is residual delay observed after a bounded drain.
+	SharedQueueDelay time.Duration
+	// ControlQueueDelay excludes the shared allowance; QueueDelay remains raw.
+	ControlQueueDelay time.Duration
+	QueueTarget       time.Duration
+	QueueState        string
 
 	LossRatioRound           float64
 	LossRatioEWMA            float64
@@ -239,10 +246,14 @@ type AdaptiveBDPDebugInfo struct {
 	MinRTT      time.Duration
 	SmoothedRTT time.Duration
 	QueueDelay  time.Duration
-	QueueTarget time.Duration
-	QueueState  string
-	PacingGain  float64
-	CwndGain    float64
+	// SharedQueueDelay is residual delay observed after a bounded drain.
+	SharedQueueDelay time.Duration
+	// ControlQueueDelay excludes the shared allowance; QueueDelay remains raw.
+	ControlQueueDelay time.Duration
+	QueueTarget       time.Duration
+	QueueState        string
+	PacingGain        float64
+	CwndGain          float64
 
 	NegativeBandwidthConfidence    float64
 	HasCongestionEvidence          bool

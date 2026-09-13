@@ -131,7 +131,7 @@ func TestAdaptiveBDPProbeRTTWaitsForRoundAndDurationThenRefreshesMinRTT(t *testi
 	require.Equal(t, start.Add(200*time.Millisecond), s.minRTTTimestamp)
 	require.True(t, s.rttStats.SmoothedRTT() > s.minRTT+s.queueTarget()/2)
 	require.Equal(t, adaptiveBDPProbeBW, s.state)
-	require.Equal(t, s.minCongestionWindow, s.congestionWindow, "ProbeRTT must restore cwnd gradually")
+	require.Equal(t, min(protocol.ByteCount(64*1280), s.targetCwnd()), s.congestionWindow, "successful ProbeRTT restores the prior window within the current target")
 	require.Equal(t, "probe_rtt_complete", s.lastStateChangeReason)
 }
 
@@ -456,6 +456,7 @@ func TestAdaptiveBDPIdleRestartUsesOneProbePerRound(t *testing.T) {
 			DeliveryRate:   protocol.ByteCount(rate),
 			AckedBytes:     1280,
 			DeliveredBytes: delivered,
+			PriorDelivered: delivered - 1280,
 			PriorInFlight:  64 * 1280,
 			Interval:       100 * time.Millisecond,
 			RTT:            100 * time.Millisecond,
@@ -673,6 +674,7 @@ func TestAdaptiveBDPTelemetryRecordsRoundsAndStateTransitions(t *testing.T) {
 		DeliveryRate:   protocol.ByteCount(mbitToBytesPerSecond(10)),
 		AckedBytes:     1280,
 		DeliveredBytes: 2560,
+		PriorDelivered: 1280,
 		DeliveredDelta: 1280,
 		PriorInFlight:  64 * 1280,
 		Interval:       100 * time.Millisecond,
@@ -770,6 +772,53 @@ func TestAdaptiveBDPQueueGrowthCapacityDownshift(t *testing.T) {
 	require.Equal(t, s.shortBw, s.bw)
 	require.True(t, s.shortBwCongestionConfirmed)
 	require.Equal(t, "queue_growth_capacity_downshift", s.lastBWChangeReason)
+}
+
+func TestAdaptiveBDPQueueGrowthDownshiftTelemetryWhileAlreadyDraining(t *testing.T) {
+	start := monotime.Now()
+	clock := mockClock(start)
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(60*time.Millisecond, 0)
+	s := NewAdaptiveBDPSender(&clock, rttStats, &utils.ConnectionStats{}, 1280,
+		CwndTuningConfig{Enable: true, EnableAdaptiveBDPTelemetry: true})
+	s.state = adaptiveBDPProbeDown
+	s.minRTT = 30 * time.Millisecond
+	s.minRTTTimestamp = start
+	s.bw = 12_500_000
+	s.maxBw = s.bw
+	s.pacingRateBytesPerSecond = s.bw
+	s.queueHighRounds = s.queuePersistentRounds()
+	s.hasQueueGrowthSample = true
+	s.lastQueueGrowthTime = start
+	s.congestionWindow = 600 * 1024
+	clock.Advance(30 * time.Millisecond)
+	sample := RateSample{
+		IsValid: true, DeliveryRate: protocol.ByteCount(s.bw), RTT: 60 * time.Millisecond,
+		DeliveredBytes: 1280, AckedBytes: 1280,
+	}
+	s.OnPacketAckedWithRateSample(1, 1280, 600*1024, clock.Now(), sample)
+	require.Equal(t, adaptiveBDPProbeDown, s.state)
+	var downshifts []AdaptiveBDPTelemetrySample
+	for _, sample := range s.telemetry {
+		require.NotEqual(t, "state_transition", sample.Event, "the controller was already draining")
+		if sample.Event == "bandwidth_downshift" {
+			downshifts = append(downshifts, sample)
+		}
+	}
+	require.Len(t, downshifts, 1)
+	recorded := downshifts[0]
+	require.Equal(t, "queue_growth_capacity_downshift", recorded.TransitionReason)
+	require.Less(t, recorded.BandwidthBytesPerSecond, uint64(12_500_000))
+	require.Equal(t, s.bw, recorded.BandwidthBytesPerSecond)
+	require.Equal(t, s.pacingRateBytesPerSecond, recorded.PacingRateBytesPerSecond)
+	require.Equal(t, s.congestionWindow, recorded.CongestionWindow)
+
+	// Another ACK for the same flight must not duplicate the downshift event.
+	before := len(s.telemetry)
+	sample.DeliveredBytes += 1280
+	clock.Advance(time.Millisecond)
+	s.OnPacketAckedWithRateSample(2, 1280, 600*1024, clock.Now(), sample)
+	require.Len(t, s.telemetry, before)
 }
 
 func TestAdaptiveBDPCongestionEvidence(t *testing.T) {
@@ -1751,6 +1800,7 @@ func TestAdaptiveBDPThirtyMbps150msNoLossModel(t *testing.T) {
 				DeliveryRate:   protocol.ByteCount(uint64(float64(priorInFlight) / baseRTT.Seconds())),
 				AckedBytes:     priorInFlight,
 				DeliveredBytes: deliveredTotal,
+				PriorDelivered: deliveredTotal - priorInFlight,
 				DeliveredDelta: priorInFlight,
 				PriorInFlight:  priorInFlight,
 				Interval:       baseRTT,
@@ -2130,7 +2180,7 @@ func TestAdaptiveBDPPipeFilledForDownshiftUsesKnownTarget(t *testing.T) {
 	s.minRTT = 150 * time.Millisecond
 	s.queueHighRounds = s.queuePersistentRounds()
 	require.True(t, s.hasCongestionEvidence())
-	require.Equal(t, protocol.ByteCount(float64(expectedPipe)*0.75), s.pipeFillThreshold())
+	require.Equal(t, protocol.ByteCount(float64(expectedPipe)*0.50), s.pipeFillThreshold())
 }
 
 func TestAdaptiveBDPHighSampleWithoutQueueRaisesMaxBW(t *testing.T) {
@@ -2642,7 +2692,7 @@ func TestAdaptiveBDPNoCongestionDownshiftIsGradual(t *testing.T) {
 	require.False(t, s.hasCongestionEvidence())
 	require.GreaterOrEqual(t, s.shortBw, minFirstDownshift)
 	require.GreaterOrEqual(t, s.pacingRateBytesPerSecond, uint64(float64(minFirstDownshift)*0.90))
-	require.Greater(t, s.targetCwnd(), protocol.ByteCount(500*1024))
+	require.GreaterOrEqual(t, s.targetCwnd(), s.bdpForBandwidth(minFirstDownshift))
 	require.Equal(t, adaptiveBDPProbeBW, s.state)
 	require.Equal(t, "short_bw_gradual_no_queue_downshift", s.lastBWChangeReason)
 }
@@ -4279,7 +4329,7 @@ func TestAdaptiveBDPDefaultProbeIntervalLeavesUpshiftMargin(t *testing.T) {
 		1280,
 		CwndTuningConfig{Enable: true},
 	)
-	require.Equal(t, 900*time.Millisecond, s.probeInterval())
+	require.Equal(t, 450*time.Millisecond, s.probeInterval())
 
 	s.cfg.ProbeInterval = 250 * time.Millisecond
 	require.Equal(t, 250*time.Millisecond, s.probeInterval())
@@ -4738,6 +4788,7 @@ func TestAdaptiveBDPMaybeStartLossRecoveryProbeLiftsShortBandwidth(t *testing.T)
 	s.minRTT = 100 * time.Millisecond
 	s.roundCount = 10
 	s.lossFreeRounds = 2
+	s.hasLastLossCutbackRound = true // simulate a preceding loss cutback
 	s.maxBw = mbitToBytesPerSecond(30)
 	s.bw = mbitToBytesPerSecond(4)
 	s.shortBw = mbitToBytesPerSecond(4)
@@ -4793,6 +4844,7 @@ func TestAdaptiveBDPMaybeStartLossRecoveryProbeHonorsGoalAndGuards(t *testing.T)
 	s.minRTT = 100 * time.Millisecond
 	s.roundCount = 10
 	s.lossFreeRounds = 2
+	s.hasLastLossCutbackRound = true // simulate a preceding loss cutback
 	s.maxBw = mbitToBytesPerSecond(20)
 	s.bw = mbitToBytesPerSecond(19)
 	s.shortBw = mbitToBytesPerSecond(19)
@@ -4967,6 +5019,7 @@ func TestAdaptiveBDPACKPathStartsLossRecoveryProbe(t *testing.T) {
 	s.minRTT = 100 * time.Millisecond
 	s.lastRoundStartTime = start.Add(-200 * time.Millisecond)
 	s.lossFreeRounds = 2
+	s.hasLastLossCutbackRound = true // simulate a preceding loss cutback
 	s.maxBw = mbitToBytesPerSecond(30)
 	s.bw = mbitToBytesPerSecond(4)
 	s.shortBw = mbitToBytesPerSecond(4)
@@ -5020,6 +5073,7 @@ func TestAdaptiveBDPLossRecoveryProbeAdvancesOncePerRound(t *testing.T) {
 	s.minRTT = 100 * time.Millisecond
 	s.lastRoundStartTime = start.Add(-200 * time.Millisecond)
 	s.lossFreeRounds = 2
+	s.hasLastLossCutbackRound = true // simulate a preceding loss cutback
 	s.maxBw = mbitToBytesPerSecond(30)
 	s.bw = mbitToBytesPerSecond(4)
 	s.shortBw = mbitToBytesPerSecond(4)
@@ -5029,6 +5083,7 @@ func TestAdaptiveBDPLossRecoveryProbeAdvancesOncePerRound(t *testing.T) {
 			DeliveryRate:   protocol.ByteCount(mbitToBytesPerSecond(4)),
 			AckedBytes:     1280,
 			DeliveredBytes: delivered,
+			PriorDelivered: delivered - 1280,
 			PriorInFlight:  64 * 1280,
 			Interval:       100 * time.Millisecond,
 			RTT:            100 * time.Millisecond,
@@ -5082,6 +5137,7 @@ func TestLossCutbackRecoversAfterLossFreeRounds(t *testing.T) {
 	s.shortBw = 300 * 1024
 	s.bw = s.shortBw
 	s.lossFreeRounds = 2
+	s.hasLastLossCutbackRound = true // simulate a preceding loss cutback
 	s.congestionWindow = 256 * 1280
 	s.updatePacingRate()
 	oldPacing := s.pacingRateBytesPerSecond
@@ -5117,6 +5173,7 @@ func TestLossCutbackRecoversAfterLossFreeRounds(t *testing.T) {
 			DeliveryRate:   protocol.ByteCount(300 * 1024),
 			AckedBytes:     1280,
 			DeliveredBytes: 2560,
+			PriorDelivered: 1280,
 			PriorInFlight:  256 * 1280,
 			Interval:       150 * time.Millisecond,
 			RTT:            150 * time.Millisecond,
@@ -5234,6 +5291,7 @@ func TestLossRecoveryDoesNotRequireHighDeliverySample(t *testing.T) {
 	s.minRTT = 150 * time.Millisecond
 	s.roundCount = 10
 	s.lossFreeRounds = 2
+	s.hasLastLossCutbackRound = true // simulate a preceding loss cutback
 	s.maxBw = 3_750_000
 	s.bw = 294 * 1024
 	s.shortBw = 294 * 1024

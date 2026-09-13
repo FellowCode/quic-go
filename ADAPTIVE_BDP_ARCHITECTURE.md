@@ -23,6 +23,20 @@ AdaptiveBDP is a BDP-oriented congestion controller for high-throughput paths wh
 
 The controller state lives in `adaptiveBDPSender`.
 
+The implementation is divided by responsibility:
+
+- `adaptive_bdp_measurements.go`: RTT and packet-timed round observations; observations do not enter controller states or cut cwnd.
+- `adaptive_bdp_bandwidth.go`: delivery-rate filtering and bandwidth model updates.
+- `adaptive_bdp_decisions.go`: pure queue-capacity estimation and ProbeDown policy over value snapshots.
+- `adaptive_bdp_queue.go`: queue observation history and application of capacity decisions.
+- `adaptive_bdp_ack.go`: ordered ACK processing, completed-round loss reactions, state transitions and output updates.
+- `adaptive_bdp_telemetry.go`: a 2048-entry ring with constant-time recording; debug reads return independent chronological snapshots.
+
+ACK ordering is deliberate: observe RTT and apply a requested ProbeRTT entry,
+observe the round and apply its loss reaction, then update bandwidth. Finally apply
+probe/state policy and update pacing/cwnd. This preserves ProbeRTT filtering and
+ensures loss observations are consumed before round counters are cleared.
+
 Important state groups:
 
 - Window state: `congestionWindow`, `minCongestionWindow`, `maxCongestionWindow`, `initialWindow`.
@@ -34,6 +48,34 @@ Important state groups:
 - Upload warmup state: `lastRetransmittableSentTime`, `uploadWarmupStartTime`, `uploadWarmupAcked`.
 - Loss reaction state: `lossRatioEWMA`, `mildLossRounds`, `lastLossCutbackTime`, `lastLossActionReason`, loss multipliers.
 - Debug reasons: `lastStateChangeReason`, `lastCwndChangeReason`, `lastBWChangeReason`.
+
+## Fairness Acceptance
+
+Competing-flow tests measure cumulative application bytes over the same interval:
+start 1.5 seconds after the later sender starts, measure for 2 seconds, and require
+both transfers to remain active through the end. This excludes startup and solo
+completion tails. The longest configured RTT is 200 ms, giving 7.5 RTTs of warmup
+and 10 RTTs of measurement. Payloads are 16 MiB per flow.
+
+Equal-RTT, unequal-RTT and late-start AdaptiveBDP pairs require Jain >= 0.90
+(at most a 2:1 split). Cubic/Reno comparisons retain the 0.5..2 throughput-ratio
+gate. All scenarios require at least 80% combined application utilization, so
+equal starvation cannot pass.
+
+The default queue target is 10 ms for every propagation RTT. Default steady-state
+cwnd padding is capped to two queue-target intervals instead of growing with RTT;
+an explicit `CruiseCwndGain` retains the requested multiplier. Loss recovery
+requires an actual loss episode and a remaining short-bandwidth cap, rather than
+treating every clean round as permission to reclaim the entire configured link.
+
+After at least two RTTs (and 200 ms) of unsuccessful draining, a stable residual
+queue may be maintained by competing traffic. The controller budgets its inflight
+bytes separately, capped at 150 ms, and resumes ProbeBW. The allowance shrinks
+with the measured queue and resets on material loss, ECN, idle restart and
+persistent congestion. `SharedQueueDelay` and `ControlQueueDelay` expose this
+policy; raw `QueueDelay` and propagation `MinRTT` retain their physical meaning.
+This permits coexistence with loss-based controllers, with a larger standing
+queue than on an isolated AdaptiveBDP path.
 
 ## Configuration Surface
 
@@ -175,10 +217,21 @@ Main reasons:
 
 Loss handling is centralized in `handleLossReaction()`.
 
+Rounds smaller than `MinLossSampleBytes` retain ACKed and lost bytes until a
+sufficient observation is available. Each observation updates EWMA and persistence
+once; clean observations accumulate in the same way to permit recovery. Per-round
+telemetry remains per-round. Pending observations are cleared on idle restart and
+persistent congestion.
+
+After loss, a full paced pipe can be marked app-limited by the send-time inflight
+heuristic. Once sufficient clean observations arrive, recovery may probe upward
+if a valid delivery sample matches the pacing rate within its margin and inflight
+covers the paced BDP. A truly underfilled or slow application remains excluded.
+
 The flow is:
 
 1. Update loss EWMA.
-2. Use the max of round loss ratio and EWMA.
+2. Use the max of the accumulated observation's loss ratio and EWMA.
 3. Check absolute byte and sample-size eligibility.
 4. Apply emergency reaction only when ratio and absolute bytes are both sufficient.
 5. For mild no-queue loss, suppress ProbeUp rather than collapsing cwnd.
@@ -244,7 +297,7 @@ Main states:
 - `Drain`: drains queue after startup.
 - `ProbeBW`: normal cruise/probe state.
 - `ProbeDown`: drain/recovery after congestion evidence.
-- `ProbeRTT`: reserved state.
+- `ProbeRTT`: temporarily caps inflight to refresh the minimum RTT. Its delivery samples are treated as application-limited for bandwidth estimation, and its rounds do not age the bandwidth max filter. Higher samples can still raise the estimate. A successful measurement restores the saved cwnd, bounded by the current target and configured limits, unless fresh ECN or material loss was observed. An inconclusive timeout keeps gradual window recovery.
 
 No-congestion gradual downshift should stay in `ProbeBW`. ProbeDown is reserved for queue, ECN, loss, or confirmed congestion downshift.
 

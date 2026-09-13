@@ -708,30 +708,28 @@ func TestAdaptiveBDPDeterministicLinkUnequalRTTAdaptiveBDPFairness(t *testing.T)
 		}, quic.CongestionControlAdaptiveBDP, quic.CongestionControlAdaptiveBDP)
 		jain := jainFairness(result.rates)
 		t.Logf("unequal-RTT AdaptiveBDP fairness (20ms,200ms): rates=%0.0f,%0.0f bps jain=%0.4f queue_delay_p95=%s tail_drops=%d", result.rates[0], result.rates[1], jain, result.queueDelayPercentile(95), result.forward.TailDrops)
-		require.Greater(t, result.rates[0], float64(0))
-		require.Greater(t, result.rates[1], float64(0))
+		require.GreaterOrEqual(t, jain, 0.90, "RTT asymmetry must not permit more than a 2:1 throughput split")
 		require.Zero(t, result.forward.TailDrops)
 	})
 }
 
 func TestAdaptiveBDPDeterministicLinkLateStartAdaptiveBDPFairness(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		result := runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 25*time.Millisecond, nil, []time.Duration{0, 500 * time.Millisecond}, 8*1024*1024, quic.CongestionControlAdaptiveBDP, quic.CongestionControlAdaptiveBDP)
+		result := runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 25*time.Millisecond, nil, []time.Duration{0, 500 * time.Millisecond}, 16*1024*1024, quic.CongestionControlAdaptiveBDP, quic.CongestionControlAdaptiveBDP)
 		jain := jainFairness(result.rates)
 		t.Logf("late-start AdaptiveBDP fairness: rates=%0.0f,%0.0f bps jain=%0.4f queue_delay_p95=%s tail_drops=%d", result.rates[0], result.rates[1], jain, result.queueDelayPercentile(95), result.forward.TailDrops)
 		require.True(t, result.firstFlowActiveAtSecondStart, "the second flow must start while the first transfer is still active")
-		require.Greater(t, result.rates[0], float64(0))
-		require.Greater(t, result.rates[1], float64(0))
+		require.GreaterOrEqual(t, jain, 0.90, "late arrival must converge to a fair share")
 		require.Zero(t, result.forward.TailDrops)
 	})
 }
 
 func runAdaptiveBDPDeterministicCompetingFlows(t *testing.T, algorithms ...quic.CongestionControlAlgorithm) competingFlowsResult {
-	return runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 25*time.Millisecond, nil, nil, 1024*1024, algorithms...)
+	return runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 25*time.Millisecond, nil, nil, 16*1024*1024, algorithms...)
 }
 
 func runAdaptiveBDPDeterministicCompetingFlowsWithAccessDelay(t *testing.T, accessDelay simnet.PacketDelaySelector, algorithms ...quic.CongestionControlAlgorithm) competingFlowsResult {
-	return runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 10*time.Millisecond, accessDelay, nil, 1024*1024, algorithms...)
+	return runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t, 10*time.Millisecond, accessDelay, nil, 16*1024*1024, algorithms...)
 }
 
 type competingFlowsResult struct {
@@ -790,11 +788,11 @@ func runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t *testing.T, baseLat
 	ln, err := quic.Listen(serverPacketConn, getTLSConfig(), serverConfig)
 	require.NoError(t, err)
 	defer ln.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	clients := make([]*quic.Conn, len(clientPacketConns))
 	for i, packetConn := range clientPacketConns {
-		clientConfig := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{Enable: true, Algorithm: algorithms[i], StartupTargetRateBps: 30_000_000}})
+		clientConfig := getQuicConfig(&quic.Config{CwndTuning: quic.CwndTuning{Enable: true, Algorithm: algorithms[i], StartupTargetRateBps: 30_000_000, EnableAdaptiveBDPTelemetry: true}})
 		clients[i], err = quic.Dial(ctx, packetConn, serverAddr, getTLSClientConfig(), clientConfig)
 		require.NoError(t, err)
 		defer clients[i].CloseWithError(0, "")
@@ -810,21 +808,36 @@ func runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t *testing.T, baseLat
 		index   int
 		elapsed time.Duration
 		err     error
+		samples []adaptiveBDPDeliverySample
 	}
 	reads := make(chan flowResult, len(servers))
 	firstReadDone := make(chan struct{})
 	start := time.Now()
 	for index, server := range servers {
 		go func(index int, server *quic.Conn) {
+			var samples []adaptiveBDPDeliverySample
 			stream, err := server.AcceptStream(ctx)
 			if err == nil {
-				data, readErr := io.ReadAll(stream)
-				if readErr == nil && !bytes.Equal(data, payload) {
-					readErr = errors.New("unexpected fairness payload")
+				var data bytes.Buffer
+				buf := make([]byte, 32*1024)
+				for {
+					n, readErr := stream.Read(buf)
+					if n > 0 {
+						data.Write(buf[:n])
+						samples = append(samples, adaptiveBDPDeliverySample{at: time.Since(start), bytes: uint64(data.Len())})
+					}
+					if readErr != nil {
+						if readErr != io.EOF {
+							err = readErr
+						}
+						break
+					}
 				}
-				err = readErr
+				if err == nil && !bytes.Equal(data.Bytes(), payload) {
+					err = errors.New("unexpected fairness payload")
+				}
 			}
-			reads <- flowResult{index: index, elapsed: time.Since(start), err: err}
+			reads <- flowResult{index: index, elapsed: time.Since(start), err: err, samples: samples}
 			if index == 0 {
 				close(firstReadDone)
 			}
@@ -875,13 +888,28 @@ func runAdaptiveBDPDeterministicCompetingFlowsWithSchedule(t *testing.T, baseLat
 		}
 	}
 	rates := make([]float64, len(clients))
+	// Seven and a half RTTs of the longest path for warmup, then ten RTTs
+	// measured on the same wall-clock interval. Exclude solo-transfer tails.
+	measurementStart := slices.Max(writeStarts) + 1500*time.Millisecond
+	measurementEnd := measurementStart + 2*time.Second
 	for range rates {
 		result := <-reads
 		require.NoError(t, result.err)
-		elapsed := result.elapsed - writeStarts[result.index]
-		require.Greater(t, elapsed, time.Duration(0))
-		rates[result.index] = float64(len(payload)*8) / elapsed.Seconds()
+		require.Greater(t, result.elapsed, measurementEnd, "both flows must remain active throughout the common interval")
+		rates[result.index] = applicationRateDuring(result.samples, measurementStart, measurementEnd)
 	}
+	t.Logf("common fairness interval: [%s, %s], rates=%v bps", measurementStart, measurementEnd, rates)
+	for i, client := range clients {
+		if info, ok := client.AdaptiveBDPDebugInfo(); ok {
+			for _, sample := range info.Telemetry {
+				if sample.Elapsed >= measurementEnd && sample.Event == "round" {
+					t.Logf("flow %d controller: state=%s bw=%d pacing=%d cwnd=%d inflight=%d minRTT=%s queue=%s reason=%s", i, sample.State, sample.BandwidthBytesPerSecond, sample.PacingRateBytesPerSecond, sample.CongestionWindow, sample.BytesInFlight, sample.MinRTT, sample.QueueDelay, sample.TransitionReason)
+					break
+				}
+			}
+		}
+	}
+	require.GreaterOrEqual(t, rates[0]+rates[1], float64(30_000_000)*0.80, "equal starvation must not count as fairness")
 	stopPump()
 	pumpStopped = true
 	return competingFlowsResult{
@@ -903,6 +931,25 @@ func jainFairness(rates []float64) float64 {
 		return 0
 	}
 	return sum * sum / (float64(len(rates)) * sumSquares)
+}
+
+// Count cumulative application bytes over (start, end], using identical time
+// boundaries for every flow, independent of read chunking and completion time.
+func applicationRateDuring(samples []adaptiveBDPDeliverySample, start, end time.Duration) float64 {
+	if end <= start {
+		return 0
+	}
+	var before, after uint64
+	for _, sample := range samples {
+		if sample.at <= start {
+			before = sample.bytes
+		}
+		if sample.at > end {
+			break
+		}
+		after = sample.bytes
+	}
+	return float64(after-before) * 8 / (end - start).Seconds()
 }
 
 func TestAdaptiveBDPDeterministicLinkT03RebasesBaseRTT(t *testing.T) {

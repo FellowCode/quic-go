@@ -92,8 +92,8 @@ type CwndTuningConfig struct {
 	PacingMargin float64
 }
 
-// AdaptiveBDPTelemetrySample records one completed controller round or state
-// transition. Collection is opt-in through CwndTuningConfig.
+// AdaptiveBDPTelemetrySample records a completed controller round, state
+// transition, or bandwidth downshift. Collection is opt-in through CwndTuningConfig.
 type AdaptiveBDPTelemetrySample struct {
 	Event            string
 	Elapsed          time.Duration
@@ -118,8 +118,12 @@ type AdaptiveBDPTelemetrySample struct {
 	SmoothedRTT time.Duration
 	MinRTT      time.Duration
 	QueueDelay  time.Duration
-	QueueTarget time.Duration
-	QueueState  string
+	// SharedQueueDelay is residual delay observed after a bounded drain.
+	SharedQueueDelay time.Duration
+	// ControlQueueDelay excludes the shared allowance; QueueDelay remains raw.
+	ControlQueueDelay time.Duration
+	QueueTarget       time.Duration
+	QueueState        string
 
 	LossRatioRound           float64
 	LossRatioEWMA            float64
@@ -144,7 +148,8 @@ type RateSample struct {
 	DeliveryRate   protocol.ByteCount // bytes/sec
 	AckedBytes     protocol.ByteCount
 	LostBytes      protocol.ByteCount
-	DeliveredBytes protocol.ByteCount
+	DeliveredBytes protocol.ByteCount // total delivered after processing the ACK batch
+	PriorDelivered protocol.ByteCount // greatest send-time delivered snapshot in the ACK batch
 	DeliveredDelta protocol.ByteCount
 	PriorInFlight  protocol.ByteCount
 	Interval       time.Duration
@@ -183,10 +188,14 @@ type AdaptiveBDPDebugInfo struct {
 	MinRTT      time.Duration
 	SmoothedRTT time.Duration
 	QueueDelay  time.Duration
-	QueueTarget time.Duration
-	QueueState  string
-	PacingGain  float64
-	CwndGain    float64
+	// SharedQueueDelay is residual delay observed after a bounded drain.
+	SharedQueueDelay time.Duration
+	// ControlQueueDelay excludes the shared allowance; QueueDelay remains raw.
+	ControlQueueDelay time.Duration
+	QueueTarget       time.Duration
+	QueueState        string
+	PacingGain        float64
+	CwndGain          float64
 
 	NegativeBandwidthConfidence    float64
 	HasCongestionEvidence          bool

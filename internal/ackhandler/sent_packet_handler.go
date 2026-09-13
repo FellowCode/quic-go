@@ -540,6 +540,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	var acked1RTTPacket bool
 	samplePriorInFlight := priorInFlight
 	var totalAcked protocol.ByteCount
+	var priorDelivered protocol.ByteCount
 	var bestSample congestion.RateSample
 	var bestSamplePacket protocol.PacketNumber
 	var sawRateSample bool
@@ -556,6 +557,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 			}
 			if hasRateSampleSupport {
 				sample := h.makeRateSample(p.packet, samplePriorInFlight, rcvTime)
+				priorDelivered = max(priorDelivered, sample.PriorDelivered)
 				totalAcked += p.Length
 				bestSamplePacket = p.PacketNumber
 				if !sample.AppLimited {
@@ -594,6 +596,10 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		if !sawRateSample {
 			bestSample = congestion.RateSample{}
 		}
+		// Round boundaries describe the entire ACK batch, independently of
+		// which packet supplied the best delivery-rate measurement.
+		bestSample.DeliveredBytes = h.deliveredBytes
+		bestSample.PriorDelivered = priorDelivered
 		if bestSample.AckedBytes == 0 {
 			bestSample.AckedBytes = totalAcked
 		}
@@ -650,6 +656,7 @@ func (h *sentPacketHandler) makeRateSample(p *packet, priorInFlight protocol.Byt
 	sample := congestion.RateSample{
 		AckedBytes:     p.Length,
 		DeliveredBytes: h.deliveredBytes,
+		PriorDelivered: p.DeliveredBytes,
 		PriorInFlight:  priorInFlight,
 		RTT:            rtt,
 		AppLimited:     p.IsAppLimited,
